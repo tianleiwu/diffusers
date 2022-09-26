@@ -1,6 +1,12 @@
+# Modified from https://github.com/mherrmann/timer-cm/blob/master/timer_cm.py
+# MIT License
+# Copyright (c) 2017 Michael Herrmann
+# Modifications: output average. Copyright (c) 2022 Tianlei Wu
+
 from decimal import Decimal
 from math import ceil, log10
 from timeit import default_timer
+
 
 class Timer(object):
     def __init__(self, name, print_results=True):
@@ -42,38 +48,38 @@ class Timer(object):
         self.elapsed += self._get_time() - self._start_time
 
     def print_results(self):
-        print('-'*20)
+        print("-" * 20)
         print("Total:")
         print(self._format_results())
-        print('-'*20)
+        print("-" * 20)
         print("Average:")
         print(self._average_results())
 
-    def _format_results(self, indent='  '):
+    def _format_results(self, indent="  "):
         children = self._children.values()
         elapsed = self.elapsed or sum(c.elapsed for c in children)
-        result = '%24s - %.3fs' % (self._name, elapsed)
+        result = "%24s - %.3fs" % (self._name, elapsed)
         max_count = max(c._count for c in children) if children else 0
         count_digits = 0 if max_count <= 1 else int(ceil(log10(max_count + 1)))
         for child in sorted(children, key=lambda c: c.elapsed, reverse=True):
-            lines = child._format_results(indent).split('\n')
+            lines = child._format_results(indent).split("\n")
             child_percent = child.elapsed / elapsed * 100
-            lines[0] += ' (%d%%)' % child_percent
+            lines[0] += " (%d%%)" % child_percent
             if count_digits:
                 # `+2` for the 'x' and the space ' ' after it:
-                lines[0] = ('%dx ' % child._count).rjust(count_digits + 2)  + lines[0]
+                lines[0] = ("%dx " % child._count).rjust(count_digits + 2) + lines[0]
             for line in lines:
-                result += '\n' + indent + line
+                result += "\n" + indent + line
         return result
 
-    def _average_results(self, indent='  '):
+    def _average_results(self, indent="  "):
         children = self._children.values()
         elapsed = self.elapsed or sum(c.elapsed for c in children)
-        result = '%24s - %.1fms' % (self._name, elapsed * 1000 / max(1, self._count))
+        result = "%24s - %.1fms" % (self._name, elapsed * 1000 / max(1, self._count))
         for child in sorted(children, key=lambda c: c.elapsed / c._count, reverse=True):
-            lines = child._average_results(indent).split('\n')
+            lines = child._average_results(indent).split("\n")
             for line in lines:
-                result += '\n' + indent + line
+                result += "\n" + indent + line
         return result
 
     def _get_time(self):

@@ -13,7 +13,8 @@ from . import StableDiffusionPipelineOutput
 from .cuda_profiler import CudaProfiler
 from .timer import Timer
 
-_CUDA_PROFILER = CudaProfiler()
+_CUDA_PROFILER = CudaProfiler()  # TODO: Remove profiler
+
 
 class StableDiffusionOnnxPipeline(DiffusionPipeline):
     vae_decoder: OnnxRuntimeModel
@@ -70,8 +71,8 @@ class StableDiffusionOnnxPipeline(DiffusionPipeline):
             raise ValueError(f"`height` and `width` have to be divisible by 8 but are {height} and {width}.")
 
         # get prompt text embeddings
-        timer = Timer(f'OnnxPipeline({prompt})')
-        with timer.child('tokenizer'):
+        timer = Timer(f"OnnxPipeline({prompt})")
+        with timer.child("tokenizer"):
             text_input = self.tokenizer(
                 prompt,
                 padding="max_length",
@@ -80,9 +81,9 @@ class StableDiffusionOnnxPipeline(DiffusionPipeline):
                 return_tensors="np",
             )
 
-        #print("input_ids shape", text_input.input_ids.shape)
+        # print("input_ids shape", text_input.input_ids.shape)
 
-        with timer.child('text_encoder'):
+        with timer.child("text_encoder"):
             text_embeddings = self.text_encoder(input_ids=text_input.input_ids.astype(np.int32))[0]
 
         # here `guidance_scale` is defined analog to the guidance weight `w` of equation (2)
@@ -91,7 +92,7 @@ class StableDiffusionOnnxPipeline(DiffusionPipeline):
         do_classifier_free_guidance = guidance_scale > 1.0
         # get unconditional embeddings for classifier free guidance
         if do_classifier_free_guidance:
-            with timer.child('embeddings_for_guidance'):
+            with timer.child("embeddings_for_guidance"):
                 max_length = text_input.input_ids.shape[-1]
                 uncond_input = self.tokenizer(
                     [""] * batch_size, padding="max_length", max_length=max_length, return_tensors="np"
@@ -135,14 +136,10 @@ class StableDiffusionOnnxPipeline(DiffusionPipeline):
                 latent_model_input = latent_model_input / ((sigma**2 + 1) ** 0.5)
 
             # predict the noise residual
-            with timer.child('unet'):
-                if i == 10:
-                    _CUDA_PROFILER.start()
+            with timer.child("unet"):
                 noise_pred = self.unet(
                     sample=latent_model_input, timestep=np.array([t]), encoder_hidden_states=text_embeddings
                 )
-                if i == 10:
-                    _CUDA_PROFILER.stop()
 
             noise_pred = noise_pred[0]
 
@@ -152,30 +149,32 @@ class StableDiffusionOnnxPipeline(DiffusionPipeline):
                 noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_text - noise_pred_uncond)
 
             # compute the previous noisy sample x_t -> x_t-1
-            with timer.child('scheduler'):
+            with timer.child("scheduler"):
                 if isinstance(self.scheduler, LMSDiscreteScheduler):
                     latents = self.scheduler.step(noise_pred, i, latents, **extra_step_kwargs).prev_sample
                 else:
                     latents = self.scheduler.step(noise_pred, t, latents, **extra_step_kwargs).prev_sample
 
         # scale and decode the image latents with vae
-        with timer.child('vae_decoder'):
+        with timer.child("vae_decoder"):
             latents = 1 / 0.18215 * latents
+            _CUDA_PROFILER.start()  # TODO: Remove profiler
             image = self.vae_decoder(latent_sample=latents)[0]
+            _CUDA_PROFILER.stop()  # TODO: Remove profiler
 
-        with timer.child('image transpose'):
+        with timer.child("image transpose"):
             image = np.clip(image / 2 + 0.5, 0, 1)
             image = image.transpose((0, 2, 3, 1))
 
         # run safety checker
-        with timer.child('feature_extractor'):
+        with timer.child("feature_extractor"):
             safety_checker_input = self.feature_extractor(self.numpy_to_pil(image), return_tensors="np")
 
-        with timer.child('safety_checker'):            
+        with timer.child("safety_checker"):
             image, has_nsfw_concept = self.safety_checker(clip_input=safety_checker_input.pixel_values, images=image)
 
         if output_type == "pil":
-            with timer.child('numpy_to_pil'):
+            with timer.child("numpy_to_pil"):
                 image = self.numpy_to_pil(image)
 
         # exclude warm up quries with small steps

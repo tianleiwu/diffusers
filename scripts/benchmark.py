@@ -1,22 +1,30 @@
-import time
 import argparse
 import os
+import time
+
+from diffusers import StableDiffusionOnnxPipeline
+
 
 def get_ort_pipeline(directory):
     import onnxruntime
-    from diffusers import StableDiffusionOnnxPipeline
 
     if directory is not None:
         assert os.path.exists(directory)
         session_options = onnxruntime.SessionOptions()
         pipe = StableDiffusionOnnxPipeline.from_pretrained(
             directory,
-            provider="CUDAExecutionProvider",
+            provider=[
+                (
+                    "CUDAExecutionProvider",
+                    {"cudnn_conv_use_max_workspace": "1", "cudnn_conv_algo_search": "EXHAUSTIVE"},
+                )
+            ],
+            # provider=[("CUDAExecutionProvider", {"cudnn_conv_use_max_workspace": '1', 'cudnn_conv_algo_search': 'EXHAUSTIVE', "cudnn_conv1d_pad_to_nc1d": '1'})]
             session_options=session_options,
         )
         return pipe
-    
-    #Original FP32 ONNX models
+
+    # Original FP32 ONNX models
     pipe = StableDiffusionOnnxPipeline.from_pretrained(
         "CompVis/stable-diffusion-v1-4",
         revision="onnx",
@@ -25,16 +33,17 @@ def get_ort_pipeline(directory):
     )
     return pipe
 
+
 def get_torch_pipeline():
+    from torch import float16
+
     from diffusers import StableDiffusionPipeline
 
-    from torch import float16
     pipe = StableDiffusionPipeline.from_pretrained(
-        "CompVis/stable-diffusion-v1-4", 
-        torch_dtype=float16,
-        revision="fp16",
-        use_auth_token=True).to("cuda")
+        "CompVis/stable-diffusion-v1-4", torch_dtype=float16, revision="fp16", use_auth_token=True
+    ).to("cuda")
     return pipe
+
 
 def run_pipeline(pipe):
     # Warm up
@@ -43,8 +52,9 @@ def run_pipeline(pipe):
     pipe("warm up", height, width, num_inference_steps=2)
 
     # Test inputs
-    prompts = ["a photo of an astronaut riding a horse on mars",
-            "cute grey cat with blue eyes, wearing a bowtie, acrylic painting"]
+    prompts = [  # "a photo of an astronaut riding a horse on mars",
+        "cute grey cat with blue eyes, wearing a bowtie, acrylic painting"
+    ]
 
     num_inference_steps = 50
     for i, prompt in enumerate(prompts):
@@ -52,25 +62,32 @@ def run_pipeline(pipe):
         image = pipe(prompt, height, width, num_inference_steps).images[0]
         inference_end = time.time()
 
-        print(f'Inference took {inference_end - inference_start} seconds')
-        image.save("onnx_{i}.jpg")
+        print(f"Inference took {inference_end - inference_start} seconds")
+        if isinstance(pipe, StableDiffusionOnnxPipeline):
+            image.save(f"onnx_{i}.jpg")
+        else:
+            image.save(f"torch_{i}.jpg")
+
 
 def run_ort(directory):
     load_start = time.time()
     pipe = get_ort_pipeline(directory)
     load_end = time.time()
-    print(f'Model loading took {load_end - load_start} seconds')
+    print(f"Model loading took {load_end - load_start} seconds")
     run_pipeline(pipe)
+
 
 def run_torch():
     load_start = time.time()
     pipe = get_torch_pipeline()
     load_end = time.time()
-    print(f'Model loading took {load_end - load_start} seconds')
+    print(f"Model loading took {load_end - load_start} seconds")
 
     from torch import autocast
+
     with autocast("cuda"):
         run_pipeline(pipe)
+
 
 def parse_arguments():
     parser = argparse.ArgumentParser()
@@ -105,12 +122,14 @@ def parse_arguments():
     args = parser.parse_args()
     return args
 
+
 def main():
     args = parse_arguments()
     if args.engine == "onnxruntime":
         run_ort(args.pipeline)
     else:
         run_torch()
+
 
 if __name__ == "__main__":
     main()

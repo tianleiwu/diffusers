@@ -1,8 +1,9 @@
 import ctypes
 
-class CudaProfiler():
+
+class CudaProfiler:
     def __init__(self):
-        self._cudart = ctypes.CDLL('libcudart.so')
+        self._cudart = ctypes.CDLL("libcudart.so")
 
     def start(self):
         ret = self._cudart.cudaProfilerStart()
