@@ -5,7 +5,7 @@ import time
 from diffusers import StableDiffusionOnnxPipeline
 
 
-def get_ort_pipeline(directory):
+def get_ort_pipeline(directory, provider):
     import onnxruntime
 
     if directory is not None:
@@ -13,13 +13,7 @@ def get_ort_pipeline(directory):
         session_options = onnxruntime.SessionOptions()
         pipe = StableDiffusionOnnxPipeline.from_pretrained(
             directory,
-            provider=[
-                (
-                    "CUDAExecutionProvider",
-                    {"cudnn_conv_use_max_workspace": "1", "cudnn_conv_algo_search": "EXHAUSTIVE"},
-                )
-            ],
-            # provider=[("CUDAExecutionProvider", {"cudnn_conv_use_max_workspace": '1', 'cudnn_conv_algo_search': 'EXHAUSTIVE', "cudnn_conv1d_pad_to_nc1d": '1'})]
+            provider=provider,
             session_options=session_options,
         )
         return pipe
@@ -28,7 +22,7 @@ def get_ort_pipeline(directory):
     pipe = StableDiffusionOnnxPipeline.from_pretrained(
         "CompVis/stable-diffusion-v1-4",
         revision="onnx",
-        provider="CUDAExecutionProvider",
+        provider=provider,
         use_auth_token=True,
     )
     return pipe
@@ -69,9 +63,9 @@ def run_pipeline(pipe):
             image.save(f"torch_{i}.jpg")
 
 
-def run_ort(directory):
+def run_ort(directory, provider):
     load_start = time.time()
-    pipe = get_ort_pipeline(directory)
+    pipe = get_ort_pipeline(directory, provider)
     load_end = time.time()
     print(f"Model loading took {load_end - load_start} seconds")
     run_pipeline(pipe)
@@ -112,12 +106,13 @@ def parse_arguments():
     )
 
     parser.add_argument(
-        "--provider",
+        "-d",
+        "--disable_conv_algo_search",
         required=False,
-        type=str,
-        default="CUDAExecutionProvider",
-        help="Execution provider to use",
+        action="store_true",
+        help="Disable cuDNN conv algo search. ",
     )
+    parser.set_defaults(disable_conv_algo_search=False)
 
     args = parser.parse_args()
     return args
@@ -126,7 +121,17 @@ def parse_arguments():
 def main():
     args = parse_arguments()
     if args.engine == "onnxruntime":
-        run_ort(args.pipeline)
+        provider = (
+            "CUDAExecutionProvider"
+            if args.disable_conv_algo_search
+            else [
+                (
+                    "CUDAExecutionProvider",
+                    {"cudnn_conv_use_max_workspace": "1", "cudnn_conv_algo_search": "EXHAUSTIVE"},
+                )
+            ]
+        )
+        run_ort(args.pipeline, provider)
     else:
         run_torch()
 
