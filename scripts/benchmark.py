@@ -71,15 +71,19 @@ def run_ort(directory, provider):
     run_pipeline(pipe)
 
 
-def run_torch():
+def run_torch(disable_conv_algo_search):
+    import torch
+
+    if not disable_conv_algo_search:
+        torch.backends.cudnn.enabled = True
+        torch.backends.cudnn.benchmark = True
+
     load_start = time.time()
     pipe = get_torch_pipeline()
     load_end = time.time()
     print(f"Model loading took {load_end - load_start} seconds")
 
-    from torch import autocast
-
-    with autocast("cuda"):
+    with torch.autocast("cuda"):
         run_pipeline(pipe)
 
 
@@ -122,18 +126,19 @@ def main():
     args = parse_arguments()
     if args.engine == "onnxruntime":
         provider = (
-            "CUDAExecutionProvider"
+            ["CUDAExecutionProvider", "CPUExecutionProvider"]
             if args.disable_conv_algo_search
             else [
                 (
                     "CUDAExecutionProvider",
                     {"cudnn_conv_use_max_workspace": "1", "cudnn_conv_algo_search": "EXHAUSTIVE"},
-                )
+                ),
+                "CPUExecutionProvider",
             ]
         )
         run_ort(args.pipeline, provider)
     else:
-        run_torch()
+        run_torch(args.disable_conv_algo_search)
 
 
 if __name__ == "__main__":
