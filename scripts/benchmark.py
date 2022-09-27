@@ -126,14 +126,14 @@ def main():
     args = parse_arguments()
     if args.engine == "onnxruntime":
         provider = (
-            ["CUDAExecutionProvider", "CPUExecutionProvider"]
+            ["CUDAExecutionProvider"]
             if args.disable_conv_algo_search
             else [
                 (
                     "CUDAExecutionProvider",
                     {"cudnn_conv_use_max_workspace": "1", "cudnn_conv_algo_search": "EXHAUSTIVE"},
                 ),
-                "CPUExecutionProvider",
+                #"CPUExecutionProvider",
             ]
         )
         run_ort(args.pipeline, provider)
