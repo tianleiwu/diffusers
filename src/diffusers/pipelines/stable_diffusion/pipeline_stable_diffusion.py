@@ -84,6 +84,8 @@ class StableDiffusionPipeline(DiffusionPipeline):
             feature_extractor=feature_extractor,
         )
 
+        self.unet_jit = None
+
     def enable_attention_slicing(self, slice_size: Optional[Union[str, int]] = "auto"):
         r"""
         Enable sliced attention computation.
@@ -268,7 +270,9 @@ class StableDiffusionPipeline(DiffusionPipeline):
 
             # predict the noise residual
             with timer.child("unet"):
-                noise_pred = self.unet(latent_model_input, t, encoder_hidden_states=text_embeddings).sample
+                if self.unet_jit is None:
+                    self.unet_jit = torch.jit.trace(self.unet, [latent_model_input, t, text_embeddings])
+                noise_pred = self.unet_jit(latent_model_input, t, text_embeddings)[0]
 
             # perform guidance
             if do_classifier_free_guidance:

@@ -208,7 +208,7 @@ class UNet2DConditionModel(ModelMixin, ConfigMixin):
         sample: torch.FloatTensor,
         timestep: Union[torch.Tensor, float, int],
         encoder_hidden_states: torch.Tensor,
-        return_dict: bool = True,
+        return_dict: bool = False,
     ) -> Union[UNet2DConditionOutput, Tuple]:
         """r
         Args:
