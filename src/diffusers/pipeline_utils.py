@@ -398,7 +398,10 @@ class DiffusionPipeline(ConfigMixin):
                 if issubclass(class_obj, torch.nn.Module):
                     loading_kwargs["torch_dtype"] = torch_dtype
                 if issubclass(class_obj, diffusers.OnnxRuntimeModel):
-                    loading_kwargs["provider"] = provider
+                    execution_provider = provider
+                    if isinstance(provider, dict):
+                        execution_provider = provider[name] if name in provider else "CPUExecutionProvider"
+                    loading_kwargs["provider"] = execution_provider
                     loading_kwargs["sess_options"] = sess_options
 
                 # check if the module is in a subdirectory

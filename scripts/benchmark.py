@@ -43,8 +43,13 @@ def run_pipeline(pipe):
     # Warm up
     height = 512
     width = 512
-    pipe("warm up", height, width, num_inference_steps=2)
+    
+    def warmup():
+        pipe("warm up", height, width, num_inference_steps=2)
 
+    from onnxruntime.transformers.benchmark_helper import measure_memory
+    measure_memory(True, warmup)
+    
     # Test inputs
     prompts = [  # "a photo of an astronaut riding a horse on mars",
         "cute grey cat with blue eyes, wearing a bowtie, acrylic painting"
@@ -125,17 +130,27 @@ def parse_arguments():
 def main():
     args = parse_arguments()
     if args.engine == "onnxruntime":
-        provider = (
-            ["CUDAExecutionProvider"]
-            if args.disable_conv_algo_search
-            else [
-                (
-                    "CUDAExecutionProvider",
-                    {"cudnn_conv_use_max_workspace": "1", "cudnn_conv_algo_search": "EXHAUSTIVE"},
-                ),
+        #assert "CUDAExecutionProvider" in onnxruntime.get_available_providers()
+        cuda_provider_settings = {
+            "arena_extend_strategy": "kSameAsRequested",
+            "cudnn_conv_use_max_workspace": "1",
+            #"cudnn_conv_algo_search": "EXHAUSTIVE",
+            #"cudnn_conv1d_pad_to_nc1d": True,
+            #"do_copy_in_default_stream": False
+        }
+        cuda_providers = ["CUDAExecutionProvider"] if args.disable_conv_algo_search else [
+                ("CUDAExecutionProvider", cuda_provider_settings),
                 #"CPUExecutionProvider",
             ]
-        )
+
+        providers = {
+            "unet": cuda_providers,
+            'safety_checker':cuda_providers,
+            'text_encoder':cuda_providers,
+            'vae_decoder':cuda_providers,
+            'vae_encoder':cuda_providers
+        }
+
         run_ort(args.pipeline, provider)
     else:
         run_torch(args.disable_conv_algo_search)

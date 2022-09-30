@@ -1,9 +1,16 @@
 import ctypes
+import platform
 
 
 class CudaProfiler:
     def __init__(self):
-        self._cudart = ctypes.CDLL("libcudart.so")
+        system = platform.system()
+        if system == "Linux":
+            self._cudart = ctypes.cdll.LoadLibrary("libcudart.so")
+        elif system == "Darwin":
+            self._cudart = ctypes.cdll.LoadLibrary("libcudart.dylib")
+        elif system == "Windows":
+            self._cudart = ctypes.windll.LoadLibrary("cudart64_110.dll")
 
     def start(self):
         ret = self._cudart.cudaProfilerStart()
