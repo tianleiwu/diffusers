@@ -28,14 +28,21 @@ def get_ort_pipeline(directory, provider):
     return pipe
 
 
-def get_torch_pipeline():
+def get_torch_pipeline(precision):
     from torch import float16
 
     from diffusers import StableDiffusionPipeline
 
-    pipe = StableDiffusionPipeline.from_pretrained(
-        "CompVis/stable-diffusion-v1-4", torch_dtype=float16, revision="fp16", use_auth_token=True
-    ).to("cuda")
+    if precision == "fp16":
+        pipe = StableDiffusionPipeline.from_pretrained(
+            "CompVis/stable-diffusion-v1-4", torch_dtype=float16, revision=precision, use_auth_token=True
+        ).to("cuda")
+    else:
+        # pipe = StableDiffusionPipeline.from_pretrained(
+        #     "CompVis/stable-diffusion-v1-4", use_auth_token=True
+        # ).to("cuda")
+        print("Skipping PyTorch FP32 for now")
+        exit(1)
     return pipe
 
 
@@ -71,7 +78,7 @@ def run_ort(directory, provider):
     run_pipeline(pipe)
 
 
-def run_torch(disable_conv_algo_search):
+def run_torch(disable_conv_algo_search, precision):
     import torch
 
     if not disable_conv_algo_search:
@@ -79,7 +86,7 @@ def run_torch(disable_conv_algo_search):
         torch.backends.cudnn.benchmark = True
 
     load_start = time.time()
-    pipe = get_torch_pipeline()
+    pipe = get_torch_pipeline(precision)
     load_end = time.time()
     print(f"Model loading took {load_end - load_start} seconds")
 
@@ -118,6 +125,15 @@ def parse_arguments():
     )
     parser.set_defaults(disable_conv_algo_search=False)
 
+    parser.add_argument(
+        "-f",
+        "--floating_point_precision",
+        required=False,
+        type=str,
+        default="fp16",
+        help="Floating point precision of model",
+    )
+
     args = parser.parse_args()
     return args
 
@@ -138,7 +154,7 @@ def main():
         )
         run_ort(args.pipeline, provider)
     else:
-        run_torch(args.disable_conv_algo_search)
+        run_torch(args.disable_conv_algo_search, args.floating_point_precision)
 
 
 if __name__ == "__main__":
