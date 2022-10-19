@@ -2,7 +2,7 @@ import argparse
 import os
 import time
 
-from diffusers import StableDiffusionOnnxPipeline
+from diffusers import OnnxStableDiffusionPipeline
 
 
 def get_ort_pipeline(directory, provider):
@@ -11,7 +11,7 @@ def get_ort_pipeline(directory, provider):
     if directory is not None:
         assert os.path.exists(directory)
         session_options = onnxruntime.SessionOptions()
-        pipe = StableDiffusionOnnxPipeline.from_pretrained(
+        pipe = OnnxStableDiffusionPipeline.from_pretrained(
             directory,
             provider=provider,
             session_options=session_options,
@@ -19,7 +19,7 @@ def get_ort_pipeline(directory, provider):
         return pipe
 
     # Original FP32 ONNX models
-    pipe = StableDiffusionOnnxPipeline.from_pretrained(
+    pipe = OnnxStableDiffusionPipeline.from_pretrained(
         "CompVis/stable-diffusion-v1-4",
         revision="onnx",
         provider=provider,
@@ -30,7 +30,6 @@ def get_ort_pipeline(directory, provider):
 
 def get_torch_pipeline(precision):
     from torch import float16
-
     from diffusers import StableDiffusionPipeline
 
     if precision == "fp16":
@@ -64,7 +63,7 @@ def run_pipeline(pipe):
         inference_end = time.time()
 
         print(f"Inference took {inference_end - inference_start} seconds")
-        if isinstance(pipe, StableDiffusionOnnxPipeline):
+        if isinstance(pipe, OnnxStableDiffusionPipeline):
             image.save(f"onnx_{i}.jpg")
         else:
             image.save(f"torch_{i}.jpg")
