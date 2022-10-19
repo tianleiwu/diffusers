@@ -60,7 +60,10 @@ class OnnxRuntimeModel:
             logger.info("No onnxruntime provider specified, using CPUExecutionProvider")
             provider = "CPUExecutionProvider"
 
-        return ort.InferenceSession(path, providers=[provider], sess_options=sess_options)
+        # Allow setting like providers=[("CUDAExecutionProvider", {"cudnn_conv_use_max_workspace": '1', 'cudnn_conv_algo_search': 'EXHAUSTIVE'})]
+        providers = provider if isinstance(provider, list) else [provider]
+
+        return ort.InferenceSession(path, providers=providers, sess_options=sess_options)
 
     def _save_pretrained(self, save_directory: Union[str, Path], file_name: Optional[str] = None, **kwargs):
         """
