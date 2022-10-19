@@ -8,12 +8,16 @@ from transformers import CLIPFeatureExtractor, CLIPTokenizer
 from ...onnx_utils import OnnxRuntimeModel
 from ...pipeline_utils import DiffusionPipeline
 from ...schedulers import DDIMScheduler, LMSDiscreteScheduler, PNDMScheduler
+from ...utils import logging
 from . import StableDiffusionPipelineOutput
 
 from .cuda_profiler import CudaProfiler
 from .timer import Timer
 
 _CUDA_PROFILER = CudaProfiler()  # TODO: Remove profiler
+
+
+logger = logging.get_logger(__name__)
 
 
 class StableDiffusionOnnxPipeline(DiffusionPipeline):
@@ -36,7 +40,6 @@ class StableDiffusionOnnxPipeline(DiffusionPipeline):
         feature_extractor: CLIPFeatureExtractor,
     ):
         super().__init__()
-        scheduler = scheduler.set_format("np")
         self.register_modules(
             vae_decoder=vae_decoder,
             text_encoder=text_encoder,
