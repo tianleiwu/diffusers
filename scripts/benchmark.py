@@ -319,7 +319,7 @@ def main():
                     "CUDAExecutionProvider",
                     {"cudnn_conv_use_max_workspace": "1", "cudnn_conv_algo_search": "EXHAUSTIVE"},
                 ),
-                #"CPUExecutionProvider",
+                # "CPUExecutionProvider",
             ]
         )
         run_ort(args.pipeline, provider, args.mode, args.batch_size)
