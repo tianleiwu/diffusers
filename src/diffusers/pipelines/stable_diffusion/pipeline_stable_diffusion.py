@@ -96,7 +96,7 @@ class StableDiffusionPipeline(DiffusionPipeline):
             feature_extractor=feature_extractor,
         )
 
-        self.unet_jit = None
+        self.unet_jit = False
 
     def enable_attention_slicing(self, slice_size: Optional[Union[str, int]] = "auto"):
         r"""
@@ -300,9 +300,11 @@ class StableDiffusionPipeline(DiffusionPipeline):
 
             # predict the noise residual
             with timer.child("unet"):
-                if self.unet_jit is None:
+                if self.unet_jit:
                     self.unet_jit = torch.jit.trace(self.unet, [latent_model_input, t, text_embeddings])
-                noise_pred = self.unet_jit(latent_model_input, t, text_embeddings)[0]
+                    noise_pred = self.unet_jit(latent_model_input, t, text_embeddings)[0]
+                else:
+                    noise_pred = self.unet(latent_model_input, t, encoder_hidden_states=text_embeddings)[0]
 
             # perform guidance
             if do_classifier_free_guidance:
@@ -334,7 +336,7 @@ class StableDiffusionPipeline(DiffusionPipeline):
             )
 
         with timer.child("safety_checker"):
-            image, has_nsfw_concept = self.safety_checker(images=image, clip_input=safety_checker_input.pixel_values)
+            image, has_nsfw_concept = self.safety_checker(images=image, clip_input=safety_checker_input.pixel_values.to(torch.float16))
 
         if output_type == "pil":
             with timer.child("numpy_to_pil"):

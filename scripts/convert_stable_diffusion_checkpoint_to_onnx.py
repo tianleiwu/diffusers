@@ -179,7 +179,7 @@ def convert_models(model_path: str, output_path: str, opset: int):
     del pipeline.safety_checker
 
     onnx_pipeline = StableDiffusionOnnxPipeline(
-        vae_encoder=OnnxRuntimeModel.from_pretrained(output_path / "vae_encoder"),
+        #vae_encoder=OnnxRuntimeModel.from_pretrained(output_path / "vae_encoder"),
         vae_decoder=OnnxRuntimeModel.from_pretrained(output_path / "vae_decoder"),
         text_encoder=OnnxRuntimeModel.from_pretrained(output_path / "text_encoder"),
         tokenizer=pipeline.tokenizer,
