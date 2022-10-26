@@ -31,17 +31,14 @@ def get_ort_pipeline(directory, provider):
     return pipe
 
 
-def get_torch_pipeline(precision):
+def get_torch_pipeline():
     from torch import float16, channels_last
     from diffusers import StableDiffusionPipeline
 
-    if precision == "fp16":
-        pipe = StableDiffusionPipeline.from_pretrained(
-            MODEL_NAME, torch_dtype=float16, revision=precision, use_auth_token=True
-        ).to("cuda")
-    else:
-        print("Skipping PyTorch FP32 for now")
-        exit(1)
+    pipe = StableDiffusionPipeline.from_pretrained(
+        MODEL_NAME, torch_dtype=float16, revision="fp16", use_auth_token=True
+    ).to("cuda")
+
     #pipe.enable_attention_slicing()
 
     pipe.unet.to(memory_format=channels_last)  # in-place operation
@@ -151,7 +148,7 @@ def load_traced():
     print(pipe.scheduler)
     return pipe
 
-def get_torch_pipeline_v2():
+def get_torchscript_pipeline():
     if not os.path.exists("unet_traced.pt"):
         trace_unet()
     return load_traced()
@@ -193,6 +190,9 @@ def run_torch_pipeline(pipe, batch_size):
         #"cute grey cat with blue eyes, wearing a bowtie, acrylic painting"
     ]
 
+    # torch disable grad
+    torch.set_grad_enabled(False)
+
     num_inference_steps = 50
     for i, prompt in enumerate(prompts):
         input_prompts = [prompt] * batch_size
@@ -213,8 +213,7 @@ def run_ort(directory, provider, batch_size):
     print(f"Model loading took {load_end - load_start} seconds")
     run_ort_pipeline(pipe, batch_size)
 
-
-def run_torch(disable_conv_algo_search, precision, batch_size):
+def run_torch(disable_conv_algo_search, batch_size, torchscript=True):
     import torch
 
     if not disable_conv_algo_search:
@@ -223,8 +222,10 @@ def run_torch(disable_conv_algo_search, precision, batch_size):
     #torch.backends.cuda.matmul.allow_tf32 = True
 
     load_start = time.time()
-    #pipe = get_torch_pipeline(precision)
-    pipe = get_torch_pipeline_v2()
+    if torchscript:
+        pipe = get_torchscript_pipeline()
+    else:
+        pipe = get_torch_pipeline()
     load_end = time.time()
     print(f"Model loading took {load_end - load_start} seconds")
 
@@ -241,7 +242,7 @@ def parse_arguments():
         required=False,
         type=str,
         default="onnxruntime",
-        choices=["onnxruntime", "torch"],
+        choices=["onnxruntime", "torch", "torchscript"],
         help="Engines to benchmark",
     )
 
@@ -255,22 +256,13 @@ def parse_arguments():
     )
 
     parser.add_argument(
-        "-d",
+        "-s",
         "--disable_conv_algo_search",
         required=False,
         action="store_true",
-        help="Disable cuDNN conv algo search. ",
+        help="Disable cuDNN conv algo search.",
     )
     parser.set_defaults(disable_conv_algo_search=False)
-
-    parser.add_argument(
-        "-f",
-        "--floating_point_precision",
-        required=False,
-        type=str,
-        default="fp16",
-        help="Floating point precision of model",
-    )
 
     parser.add_argument(
         "-b",
@@ -299,7 +291,7 @@ def main():
         )
         run_ort(args.pipeline, provider, args.batch_size)
     else:
-        run_torch(args.disable_conv_algo_search, args.floating_point_precision, args.batch_size)
+        run_torch(args.disable_conv_algo_search, args.batch_size, args.engine == "torchscript")
 
 if __name__ == "__main__":
     main()
