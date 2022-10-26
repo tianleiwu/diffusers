@@ -17,7 +17,7 @@ from .cuda_profiler import CudaProfiler
 from .timer import Timer
 
 _CUDA_PROFILER = CudaProfiler()  # TODO: remove profiler
-
+ENABLE_PROFILER = False
 
 class StableDiffusionPipeline(DiffusionPipeline):
     r"""
@@ -266,9 +266,15 @@ class StableDiffusionPipeline(DiffusionPipeline):
                 # the model input needs to be scaled to match the continuous ODE formulation in K-LMS
                 latent_model_input = latent_model_input / ((sigma**2 + 1) ** 0.5)
 
+            if ENABLE_PROFILER and i==10:
+                _CUDA_PROFILER.start()  # TODO: remove profiler
+
             # predict the noise residual
             with timer.child("unet"):
                 noise_pred = self.unet(latent_model_input, t, encoder_hidden_states=text_embeddings).sample
+
+            if ENABLE_PROFILER and i==10:
+                _CUDA_PROFILER.stop()  # TODO: remove profiler
 
             # perform guidance
             if do_classifier_free_guidance:
@@ -285,9 +291,7 @@ class StableDiffusionPipeline(DiffusionPipeline):
         # scale and decode the image latents with vae
         with timer.child("vae_decoder"):
             latents = 1 / 0.18215 * latents
-            _CUDA_PROFILER.start()  # TODO: remove profiler
             image = self.vae.decode(latents).sample
-            _CUDA_PROFILER.stop()  # TODO: remove profiler
 
         with timer.child("image transpose"):
             image = (image / 2 + 0.5).clamp(0, 1)
