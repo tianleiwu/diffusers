@@ -31,7 +31,7 @@ def get_ort_pipeline(directory, provider):
     return pipe
 
 
-def get_torch_pipeline():
+def get_torch_pipeline(disable_channels_last):
     from torch import float16, channels_last
     from diffusers import StableDiffusionPipeline
 
@@ -41,11 +41,20 @@ def get_torch_pipeline():
 
     #pipe.enable_attention_slicing()
 
-    pipe.unet.to(memory_format=channels_last)  # in-place operation
+    if not disable_channels_last:
+        pipe.unet.to(memory_format=channels_last)  # in-place operation
 
     return pipe
 
-def trace_unet():
+def get_trace_file(disable_channels_last):
+    return "unet_traced_channels_last.pt" if not disable_channels_last else "unet_traced.pt"
+
+def trace_unet(disable_channels_last):
+    filename = get_trace_file(disable_channels_last)
+    if not os.path.exists(filename):
+        print("skip tracing since file existed.")
+        return
+
     import time
     import torch
     from diffusers import StableDiffusionPipeline
@@ -73,7 +82,8 @@ def trace_unet():
     ).to("cuda")
     unet = pipe.unet
     unet.eval()
-    unet.to(memory_format=torch.channels_last)  # use channels_last memory format
+    if not disable_channels_last:
+        unet.to(memory_format=torch.channels_last)  # use channels_last memory format
     unet.forward = functools.partial(unet.forward, return_dict=False)  # set return_dict=False as default
 
     # warmup
@@ -114,9 +124,11 @@ def trace_unet():
             print(f"unet inference took {time.time() - start_time:.2f} seconds")
 
     # save the model
-    unet_traced.save("unet_traced.pt")
+    unet_traced.save(filename)
 
-def load_traced():
+def load_traced(disable_channels_last):
+    filename = get_trace_file(disable_channels_last)
+
     from diffusers import StableDiffusionPipeline
     import torch
     from dataclasses import dataclass
@@ -132,7 +144,7 @@ def load_traced():
     ).to("cuda")
 
     # use jitted unet
-    unet_traced = torch.jit.load("unet_traced.pt")
+    unet_traced = torch.jit.load(filename)
     # del pipe.unet
     class TracedUNet(torch.nn.Module):
         def __init__(self):
@@ -148,10 +160,9 @@ def load_traced():
     print(pipe.scheduler)
     return pipe
 
-def get_torchscript_pipeline():
-    if not os.path.exists("unet_traced.pt"):
-        trace_unet()
-    return load_traced()
+def get_torchscript_pipeline(disable_channels_last):
+    trace_unet(disable_channels_last)
+    return load_traced(disable_channels_last)
 
 def run_ort_pipeline(pipe, batch_size):
     assert isinstance(pipe, OnnxStableDiffusionPipeline)
@@ -213,7 +224,7 @@ def run_ort(directory, provider, batch_size):
     print(f"Model loading took {load_end - load_start} seconds")
     run_ort_pipeline(pipe, batch_size)
 
-def run_torch(disable_conv_algo_search, batch_size, torchscript=True):
+def run_torch(disable_conv_algo_search, batch_size, disable_channels_last, torchscript=True):
     import torch
 
     if not disable_conv_algo_search:
@@ -223,9 +234,9 @@ def run_torch(disable_conv_algo_search, batch_size, torchscript=True):
 
     load_start = time.time()
     if torchscript:
-        pipe = get_torchscript_pipeline()
+        pipe = get_torchscript_pipeline(disable_channels_last)
     else:
-        pipe = get_torch_pipeline()
+        pipe = get_torch_pipeline(disable_channels_last)
     load_end = time.time()
     print(f"Model loading took {load_end - load_start} seconds")
 
@@ -256,13 +267,23 @@ def parse_arguments():
     )
 
     parser.add_argument(
-        "-s",
+        "-a",
         "--disable_conv_algo_search",
         required=False,
         action="store_true",
         help="Disable cuDNN conv algo search.",
     )
     parser.set_defaults(disable_conv_algo_search=False)
+
+    parser.add_argument(
+        "-c",
+        "--disable_channels_last",
+        required=False,
+        action="store_true",
+        help="Disable channels_last.",
+    )
+    parser.set_defaults(disable_channels_last=False)
+
 
     parser.add_argument(
         "-b",
@@ -277,6 +298,8 @@ def parse_arguments():
 
 def main():
     args = parse_arguments()
+    print(args)
+    
     if args.engine == "onnxruntime":
         provider = (
             ["CUDAExecutionProvider"]
@@ -291,7 +314,7 @@ def main():
         )
         run_ort(args.pipeline, provider, args.batch_size)
     else:
-        run_torch(args.disable_conv_algo_search, args.batch_size, args.engine == "torchscript")
+        run_torch(args.disable_conv_algo_search, args.batch_size, args.disable_channels_last, args.engine == "torchscript")
 
 if __name__ == "__main__":
     main()
