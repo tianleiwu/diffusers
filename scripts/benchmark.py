@@ -2,7 +2,7 @@ import argparse
 import os
 import time
 
-from diffusers import StableDiffusionOnnxPipeline
+from diffusers import OnnxStableDiffusionPipeline
 
 
 def get_ort_pipeline(directory, provider):
@@ -11,7 +11,7 @@ def get_ort_pipeline(directory, provider):
     if directory is not None:
         assert os.path.exists(directory)
         session_options = onnxruntime.SessionOptions()
-        pipe = StableDiffusionOnnxPipeline.from_pretrained(
+        pipe = OnnxStableDiffusionPipeline.from_pretrained(
             directory,
             provider=provider,
             session_options=session_options,
@@ -19,7 +19,7 @@ def get_ort_pipeline(directory, provider):
         return pipe
 
     # Original FP32 ONNX models
-    pipe = StableDiffusionOnnxPipeline.from_pretrained(
+    pipe = OnnxStableDiffusionPipeline.from_pretrained(
         "CompVis/stable-diffusion-v1-4",
         revision="onnx",
         provider=provider,
@@ -28,14 +28,20 @@ def get_ort_pipeline(directory, provider):
     return pipe
 
 
-def get_torch_pipeline():
+def get_torch_pipeline(precision):
     from torch import float16
-
     from diffusers import StableDiffusionPipeline
 
-    pipe = StableDiffusionPipeline.from_pretrained(
-        "CompVis/stable-diffusion-v1-4", torch_dtype=float16, revision="fp16", use_auth_token=True
-    ).to("cuda")
+    if precision == "fp16":
+        pipe = StableDiffusionPipeline.from_pretrained(
+            "CompVis/stable-diffusion-v1-4", torch_dtype=float16, revision=precision, use_auth_token=True
+        ).to("cuda")
+    else:
+        # pipe = StableDiffusionPipeline.from_pretrained(
+        #     "CompVis/stable-diffusion-v1-4", use_auth_token=True
+        # ).to("cuda")
+        print("Skipping PyTorch FP32 for now")
+        exit(1)
     return pipe
 
 
@@ -57,7 +63,7 @@ def run_pipeline(pipe):
         inference_end = time.time()
 
         print(f"Inference took {inference_end - inference_start} seconds")
-        if isinstance(pipe, StableDiffusionOnnxPipeline):
+        if isinstance(pipe, OnnxStableDiffusionPipeline):
             image.save(f"onnx_{i}.jpg")
         else:
             image.save(f"torch_{i}.jpg")
@@ -71,7 +77,7 @@ def run_ort(directory, provider):
     run_pipeline(pipe)
 
 
-def run_torch(disable_conv_algo_search):
+def run_torch(disable_conv_algo_search, precision):
     import torch
 
     if not disable_conv_algo_search:
@@ -79,7 +85,7 @@ def run_torch(disable_conv_algo_search):
         torch.backends.cudnn.benchmark = True
 
     load_start = time.time()
-    pipe = get_torch_pipeline()
+    pipe = get_torch_pipeline(precision)
     load_end = time.time()
     print(f"Model loading took {load_end - load_start} seconds")
 
@@ -118,6 +124,15 @@ def parse_arguments():
     )
     parser.set_defaults(disable_conv_algo_search=False)
 
+    parser.add_argument(
+        "-f",
+        "--floating_point_precision",
+        required=False,
+        type=str,
+        default="fp16",
+        help="Floating point precision of model",
+    )
+
     args = parser.parse_args()
     return args
 
@@ -138,7 +153,7 @@ def main():
         )
         run_ort(args.pipeline, provider)
     else:
-        run_torch(args.disable_conv_algo_search)
+        run_torch(args.disable_conv_algo_search, args.floating_point_precision)
 
 
 if __name__ == "__main__":

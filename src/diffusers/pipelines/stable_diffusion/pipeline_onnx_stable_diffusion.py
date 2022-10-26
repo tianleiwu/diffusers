@@ -1,5 +1,5 @@
 import inspect
-from typing import List, Optional, Union
+from typing import Callable, List, Optional, Union
 
 import numpy as np
 
@@ -8,6 +8,7 @@ from transformers import CLIPFeatureExtractor, CLIPTokenizer
 from ...onnx_utils import OnnxRuntimeModel
 from ...pipeline_utils import DiffusionPipeline
 from ...schedulers import DDIMScheduler, LMSDiscreteScheduler, PNDMScheduler
+from ...utils import deprecate, logging
 from . import StableDiffusionPipelineOutput
 
 from .cuda_profiler import CudaProfiler
@@ -16,7 +17,10 @@ from .timer import Timer
 _CUDA_PROFILER = CudaProfiler()  # TODO: Remove profiler
 ENABLE_PROFILER = False
 
-class StableDiffusionOnnxPipeline(DiffusionPipeline):
+logger = logging.get_logger(__name__)
+
+
+class OnnxStableDiffusionPipeline(DiffusionPipeline):
     vae_decoder: OnnxRuntimeModel
     text_encoder: OnnxRuntimeModel
     tokenizer: CLIPTokenizer
@@ -27,6 +31,7 @@ class StableDiffusionOnnxPipeline(DiffusionPipeline):
 
     def __init__(
         self,
+        #vae_encoder: OnnxRuntimeModel,
         vae_decoder: OnnxRuntimeModel,
         text_encoder: OnnxRuntimeModel,
         tokenizer: CLIPTokenizer,
@@ -36,8 +41,8 @@ class StableDiffusionOnnxPipeline(DiffusionPipeline):
         feature_extractor: CLIPFeatureExtractor,
     ):
         super().__init__()
-        scheduler = scheduler.set_format("np")
         self.register_modules(
+            #vae_encoder=vae_encoder,
             vae_decoder=vae_decoder,
             text_encoder=text_encoder,
             tokenizer=tokenizer,
@@ -54,10 +59,13 @@ class StableDiffusionOnnxPipeline(DiffusionPipeline):
         width: Optional[int] = 512,
         num_inference_steps: Optional[int] = 50,
         guidance_scale: Optional[float] = 7.5,
+        negative_prompt: Optional[Union[str, List[str]]] = None,
         eta: Optional[float] = 0.0,
         latents: Optional[np.ndarray] = None,
         output_type: Optional[str] = "pil",
         return_dict: bool = True,
+        callback: Optional[Callable[[int, int, np.ndarray], None]] = None,
+        callback_steps: Optional[int] = 1,
         **kwargs,
     ):
         if isinstance(prompt, str):
@@ -69,6 +77,14 @@ class StableDiffusionOnnxPipeline(DiffusionPipeline):
 
         if height % 8 != 0 or width % 8 != 0:
             raise ValueError(f"`height` and `width` have to be divisible by 8 but are {height} and {width}.")
+
+        if (callback_steps is None) or (
+            callback_steps is not None and (not isinstance(callback_steps, int) or callback_steps <= 0)
+        ):
+            raise ValueError(
+                f"`callback_steps` has to be a positive integer but is {callback_steps} of type"
+                f" {type(callback_steps)}."
+            )
 
         # get prompt text embeddings
         timer = Timer(f"OnnxPipeline({prompt})")
@@ -114,9 +130,7 @@ class StableDiffusionOnnxPipeline(DiffusionPipeline):
         # set timesteps
         self.scheduler.set_timesteps(num_inference_steps)
 
-        # if we use LMSDiscreteScheduler, let's make sure latents are multiplied by sigmas
-        if isinstance(self.scheduler, LMSDiscreteScheduler):
-            latents = latents * self.scheduler.sigmas[0]
+        latents = latents * self.scheduler.init_noise_sigma
 
         # prepare extra kwargs for the scheduler step, since not all schedulers have the same signature
         # eta (η) is only used with the DDIMScheduler, it will be ignored for other schedulers.
@@ -130,10 +144,7 @@ class StableDiffusionOnnxPipeline(DiffusionPipeline):
         for i, t in enumerate(self.progress_bar(self.scheduler.timesteps)):
             # expand the latents if we are doing classifier free guidance
             latent_model_input = np.concatenate([latents] * 2) if do_classifier_free_guidance else latents
-            if isinstance(self.scheduler, LMSDiscreteScheduler):
-                sigma = self.scheduler.sigmas[i]
-                # the model input needs to be scaled to match the continuous ODE formulation in K-LMS
-                latent_model_input = latent_model_input / ((sigma**2 + 1) ** 0.5)
+            latent_model_input = self.scheduler.scale_model_input(latent_model_input, t)
 
             if ENABLE_PROFILER and i == 10:
                 _CUDA_PROFILER.start()  # TODO: Remove profiler
@@ -189,3 +200,27 @@ class StableDiffusionOnnxPipeline(DiffusionPipeline):
             return (image, has_nsfw_concept)
 
         return StableDiffusionPipelineOutput(images=image, nsfw_content_detected=has_nsfw_concept)
+
+
+class StableDiffusionOnnxPipeline(OnnxStableDiffusionPipeline):
+    def __init__(
+        self,
+        vae_decoder: OnnxRuntimeModel,
+        text_encoder: OnnxRuntimeModel,
+        tokenizer: CLIPTokenizer,
+        unet: OnnxRuntimeModel,
+        scheduler: Union[DDIMScheduler, PNDMScheduler, LMSDiscreteScheduler],
+        safety_checker: OnnxRuntimeModel,
+        feature_extractor: CLIPFeatureExtractor,
+    ):
+        deprecation_message = "Please use `OnnxStableDiffusionPipeline` instead of `StableDiffusionOnnxPipeline`."
+        deprecate("StableDiffusionOnnxPipeline", "1.0.0", deprecation_message)
+        super().__init__(
+            vae_decoder=vae_decoder,
+            text_encoder=text_encoder,
+            tokenizer=tokenizer,
+            unet=unet,
+            scheduler=scheduler,
+            safety_checker=safety_checker,
+            feature_extractor=feature_extractor,
+        )
