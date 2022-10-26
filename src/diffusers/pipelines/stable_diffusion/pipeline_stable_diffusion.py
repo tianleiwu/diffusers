@@ -299,7 +299,7 @@ class StableDiffusionPipeline(DiffusionPipeline):
         latents_dtype = text_embeddings.dtype
         if latents is None:
             if self.device.type == "mps":
-                # randn does not work reproducibly on mps
+                # randn does not exist on mps
                 latents = torch.randn(latents_shape, generator=generator, device="cpu", dtype=latents_dtype).to(
                     self.device
                 )
@@ -342,6 +342,10 @@ class StableDiffusionPipeline(DiffusionPipeline):
             if ENABLE_PROFILER and i==10:
                 _CUDA_PROFILER.start()  # TODO: remove profiler
 
+            # if self.unet_jit is None:
+            #     self.unet_jit = torch.jit.trace(self.unet, [latent_model_input, t, text_embeddings])
+            #     self.unet = unet_jit
+            
             # predict the noise residual
             with timer.child("unet"):
                 noise_pred = self.unet(latent_model_input, t, encoder_hidden_states=text_embeddings).sample
@@ -356,10 +360,11 @@ class StableDiffusionPipeline(DiffusionPipeline):
 
             # compute the previous noisy sample x_t -> x_t-1
             with timer.child("scheduler"):
-                if isinstance(self.scheduler, LMSDiscreteScheduler):
-                    latents = self.scheduler.step(noise_pred, i, latents, **extra_step_kwargs).prev_sample
-                else:
-                    latents = self.scheduler.step(noise_pred, t, latents, **extra_step_kwargs).prev_sample
+                latents = self.scheduler.step(noise_pred, t, latents, **extra_step_kwargs).prev_sample
+
+            # call the callback, if provided
+            if callback is not None and i % callback_steps == 0:
+                callback(i, t, latents)
 
         # scale and decode the image latents with vae
         with timer.child("vae_decoder"):
@@ -377,7 +382,15 @@ class StableDiffusionPipeline(DiffusionPipeline):
             )
 
         with timer.child("safety_checker"):
-            image, has_nsfw_concept = self.safety_checker(images=image, clip_input=safety_checker_input.pixel_values.to(torch.float16))
+            if self.safety_checker is not None:
+                safety_checker_input = self.feature_extractor(self.numpy_to_pil(image), return_tensors="pt").to(
+                    self.device
+                )
+                image, has_nsfw_concept = self.safety_checker(
+                    images=image, clip_input=safety_checker_input.pixel_values.to(text_embeddings.dtype)
+                )
+            else:
+                has_nsfw_concept = None
 
         if output_type == "pil":
             with timer.child("numpy_to_pil"):

@@ -6,7 +6,7 @@ import torch
 
 from diffusers import OnnxStableDiffusionPipeline, StableDiffusionPipeline
 
-MODEL_NAME = "CompVis/stable-diffusion-v1-4"
+MODEL_NAME = "CompVis/stable-diffusion-v1-4" #"runwayml/stable-diffusion-v1-5"
 
 def get_ort_pipeline(directory, provider):
     import onnxruntime
@@ -17,7 +17,7 @@ def get_ort_pipeline(directory, provider):
         pipe = OnnxStableDiffusionPipeline.from_pretrained(
             directory,
             provider=provider,
-            session_options=session_options,
+            sess_options=session_options,
         )
         return pipe
 
@@ -28,6 +28,8 @@ def get_ort_pipeline(directory, provider):
         provider=provider,
         use_auth_token=True,
     )
+
+    print(pipe.scheduler)
     return pipe
 
 
@@ -73,6 +75,35 @@ def get_torchscript_pipeline(disable_channels_last):
     pipe.unet = TracedUNet()
     print(pipe.scheduler)
     return pipe
+
+def get_torch_pipeline_v2():
+    if not os.path.exists("unet_traced.pt"):
+        trace_unet()
+    return load_traced()
+
+def run_ort_pipeline(pipe, batch_size):
+    assert isinstance(pipe, OnnxStableDiffusionPipeline)
+
+    # Warm up
+    height = 512
+    width = 512
+    pipe("warm up", height, width, num_inference_steps=2)
+
+    # Test inputs
+    prompts = [
+        "a photo of an astronaut riding a horse on mars",
+        #"cute grey cat with blue eyes, wearing a bowtie, acrylic painting"
+    ]
+
+    num_inference_steps = 50
+    for i, prompt in enumerate(prompts):
+        input_prompts = [prompt] * batch_size
+        inference_start = time.time()
+        image = pipe(input_prompts, height, width, num_inference_steps).images[0]
+        inference_end = time.time()
+
+        print(f"Inference took {inference_end - inference_start} seconds")
+        image.save(f"onnx_{i}.jpg")
 
 
 def get_trace_file(disable_channels_last):
@@ -220,6 +251,34 @@ def choose_mode(pipe, mode, batch_size):
 
 
 def run_ort(directory, provider, mode, batch_size):
+=======
+def run_torch_pipeline(pipe, batch_size):
+    import torch
+    # Warm up
+    height = 512
+    width = 512
+    pipe("warm up", height, width, num_inference_steps=2)
+
+    # Test inputs
+    prompts = [
+        "a photo of an astronaut riding a horse on mars",
+        #"cute grey cat with blue eyes, wearing a bowtie, acrylic painting"
+    ]
+
+    num_inference_steps = 50
+    for i, prompt in enumerate(prompts):
+        input_prompts = [prompt] * batch_size
+        torch.cuda.synchronize()
+        inference_start = time.time()
+        image = pipe(input_prompts, height, width, num_inference_steps).images[0]
+        torch.cuda.synchronize()
+        inference_end = time.time()
+
+        print(f"Inference took {inference_end - inference_start} seconds")
+        image.save(f"torch_{i}.jpg")
+
+
+def run_ort(directory, provider, batch_size):
     load_start = time.time()
     pipe = get_ort_pipeline(directory, provider)
     load_end = time.time()
@@ -231,6 +290,7 @@ def run_torch(disable_conv_algo_search, mode, batch_size):
     if not disable_conv_algo_search:
         torch.backends.cudnn.enabled = True
         torch.backends.cudnn.benchmark = True
+    #torch.backends.cuda.matmul.allow_tf32 = True
 
     load_start = time.time()
     pipe = get_torch_pipeline()
@@ -302,6 +362,13 @@ def parse_arguments():
         type=str,
         help="Mode to evaluate pipeline on",
         choices=["benchmark", "search"]
+    )
+
+    parser.add_argument(
+        "-b",
+        "--batch_size",
+        type=int,
+        default=1
     )
 
     args = parser.parse_args()
