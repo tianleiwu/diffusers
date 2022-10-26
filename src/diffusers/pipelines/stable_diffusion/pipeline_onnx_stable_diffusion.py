@@ -32,7 +32,7 @@ class OnnxStableDiffusionPipeline(DiffusionPipeline):
 
     def __init__(
         self,
-        #vae_encoder: OnnxRuntimeModel,
+        vae_encoder: OnnxRuntimeModel,
         vae_decoder: OnnxRuntimeModel,
         text_encoder: OnnxRuntimeModel,
         tokenizer: CLIPTokenizer,
@@ -71,7 +71,7 @@ class OnnxStableDiffusionPipeline(DiffusionPipeline):
             scheduler._internal_dict = FrozenDict(new_config)
 
         self.register_modules(
-            #vae_encoder=vae_encoder,
+            vae_encoder=vae_encoder,
             vae_decoder=vae_decoder,
             text_encoder=text_encoder,
             tokenizer=tokenizer,
@@ -123,16 +123,25 @@ class OnnxStableDiffusionPipeline(DiffusionPipeline):
         # get prompt text embeddings
         timer = Timer(f"OnnxPipeline({prompt})")
         with timer.child("tokenizer"):
-            text_input = self.tokenizer(
+            text_inputs = self.tokenizer(
                 prompt,
                 padding="max_length",
                 max_length=self.tokenizer.model_max_length,
-                truncation=True,
                 return_tensors="np",
+            )
+            text_input_ids = text_inputs.input_ids
+            
+        if text_input_ids.shape[-1] > self.tokenizer.model_max_length:
+            removed_text = self.tokenizer.batch_decode(text_input_ids[:, self.tokenizer.model_max_length :])
+            logger.warning(
+                "The following part of your input was truncated because CLIP can only handle sequences up to"
+                f" {self.tokenizer.model_max_length} tokens: {removed_text}"
             )
             text_input_ids = text_input_ids[:, : self.tokenizer.model_max_length]
 
-        text_embeddings = self.text_encoder(input_ids=text_input_ids.astype(np.int32))[0]
+        with timer.child("text_encoder"):
+            text_embeddings = self.text_encoder(input_ids=text_input_ids.astype(np.int32))[0]
+
         text_embeddings = np.repeat(text_embeddings, num_images_per_prompt, axis=0)
 
         # here `guidance_scale` is defined analog to the guidance weight `w` of equation (2)
