@@ -4,6 +4,7 @@ import time
 
 from diffusers import OnnxStableDiffusionPipeline
 
+MODEL_NAME = "CompVis/stable-diffusion-v1-4" #"runwayml/stable-diffusion-v1-5"
 
 def get_ort_pipeline(directory, provider):
     import onnxruntime
@@ -14,83 +15,221 @@ def get_ort_pipeline(directory, provider):
         pipe = OnnxStableDiffusionPipeline.from_pretrained(
             directory,
             provider=provider,
-            session_options=session_options,
+            sess_options=session_options,
         )
         return pipe
 
     # Original FP32 ONNX models
     pipe = OnnxStableDiffusionPipeline.from_pretrained(
-        "CompVis/stable-diffusion-v1-4",
+        MODEL_NAME,
         revision="onnx",
         provider=provider,
         use_auth_token=True,
     )
+
+    print(pipe.scheduler)
     return pipe
 
 
 def get_torch_pipeline(precision):
-    from torch import float16
+    from torch import float16, channels_last
     from diffusers import StableDiffusionPipeline
 
     if precision == "fp16":
         pipe = StableDiffusionPipeline.from_pretrained(
-            "CompVis/stable-diffusion-v1-4", torch_dtype=float16, revision=precision, use_auth_token=True
+            MODEL_NAME, torch_dtype=float16, revision=precision, use_auth_token=True
         ).to("cuda")
     else:
-        # pipe = StableDiffusionPipeline.from_pretrained(
-        #     "CompVis/stable-diffusion-v1-4", use_auth_token=True
-        # ).to("cuda")
         print("Skipping PyTorch FP32 for now")
         exit(1)
+    #pipe.enable_attention_slicing()
+
+    pipe.unet.to(memory_format=channels_last)  # in-place operation
+
     return pipe
 
+def trace_unet():
+    import time
+    import torch
+    from diffusers import StableDiffusionPipeline
+    import functools
 
-def run_pipeline(pipe):
+    # torch disable grad
+    torch.set_grad_enabled(False)
+
+    # set variables
+    n_experiments = 2
+    unet_runs_per_experiment = 50
+
+    # load inputs
+    def generate_inputs():
+        sample = torch.randn(2, 4, 64, 64).half().cuda()
+        timestep = torch.rand(1).half().cuda() * 999
+        encoder_hidden_states = torch.randn(2, 77, 768).half().cuda()
+        return sample, timestep, encoder_hidden_states
+
+
+    pipe = StableDiffusionPipeline.from_pretrained(
+        MODEL_NAME,
+        revision="fp16",
+        torch_dtype=torch.float16,
+    ).to("cuda")
+    unet = pipe.unet
+    unet.eval()
+    unet.to(memory_format=torch.channels_last)  # use channels_last memory format
+    unet.forward = functools.partial(unet.forward, return_dict=False)  # set return_dict=False as default
+
+    # warmup
+    for _ in range(3):
+        with torch.inference_mode():
+            inputs = generate_inputs()
+            orig_output = unet(*inputs)
+
+    # trace
+    print("tracing..")
+    unet_traced = torch.jit.trace(unet, inputs)
+    unet_traced.eval()
+    print("done tracing")
+
+
+    # warmup and optimize graph
+    for _ in range(5):
+        with torch.inference_mode():
+            inputs = generate_inputs()
+            orig_output = unet_traced(*inputs)
+
+
+    # benchmarking
+    with torch.inference_mode():
+        for _ in range(n_experiments):
+            torch.cuda.synchronize()
+            start_time = time.time()
+            for _ in range(unet_runs_per_experiment):
+                orig_output = unet_traced(*inputs)
+            torch.cuda.synchronize()
+            print(f"unet traced inference took {time.time() - start_time:.2f} seconds")
+        for _ in range(n_experiments):
+            torch.cuda.synchronize()
+            start_time = time.time()
+            for _ in range(unet_runs_per_experiment):
+                orig_output = unet(*inputs)
+            torch.cuda.synchronize()
+            print(f"unet inference took {time.time() - start_time:.2f} seconds")
+
+    # save the model
+    unet_traced.save("unet_traced.pt")
+
+def load_traced():
+    from diffusers import StableDiffusionPipeline
+    import torch
+    from dataclasses import dataclass
+
+    @dataclass
+    class UNet2DConditionOutput:
+        sample: torch.FloatTensor
+
+    pipe = StableDiffusionPipeline.from_pretrained(
+        MODEL_NAME,
+        revision="fp16",
+        torch_dtype=torch.float16,
+    ).to("cuda")
+
+    # use jitted unet
+    unet_traced = torch.jit.load("unet_traced.pt")
+    # del pipe.unet
+    class TracedUNet(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.in_channels = pipe.unet.in_channels
+            self.device = pipe.unet.device
+
+        def forward(self, latent_model_input, t, encoder_hidden_states):
+            sample = unet_traced(latent_model_input, t, encoder_hidden_states)[0]
+            return UNet2DConditionOutput(sample=sample)
+
+    pipe.unet = TracedUNet()
+    print(pipe.scheduler)
+    return pipe
+
+def get_torch_pipeline_v2():
+    if not os.path.exists("unet_traced.pt"):
+        trace_unet()
+    return load_traced()
+
+def run_ort_pipeline(pipe, batch_size):
+    assert isinstance(pipe, OnnxStableDiffusionPipeline)
+
     # Warm up
     height = 512
     width = 512
     pipe("warm up", height, width, num_inference_steps=2)
 
     # Test inputs
-    prompts = [  # "a photo of an astronaut riding a horse on mars",
-        "cute grey cat with blue eyes, wearing a bowtie, acrylic painting"
+    prompts = [
+        "a photo of an astronaut riding a horse on mars",
+        #"cute grey cat with blue eyes, wearing a bowtie, acrylic painting"
     ]
 
     num_inference_steps = 50
     for i, prompt in enumerate(prompts):
+        input_prompts = [prompt] * batch_size
         inference_start = time.time()
-        image = pipe(prompt, height, width, num_inference_steps).images[0]
+        image = pipe(input_prompts, height, width, num_inference_steps).images[0]
         inference_end = time.time()
 
         print(f"Inference took {inference_end - inference_start} seconds")
-        if isinstance(pipe, OnnxStableDiffusionPipeline):
-            image.save(f"onnx_{i}.jpg")
-        else:
-            image.save(f"torch_{i}.jpg")
+        image.save(f"onnx_{i}.jpg")
+
+def run_torch_pipeline(pipe, batch_size):
+    import torch
+    # Warm up
+    height = 512
+    width = 512
+    pipe("warm up", height, width, num_inference_steps=2)
+
+    # Test inputs
+    prompts = [
+        "a photo of an astronaut riding a horse on mars",
+        #"cute grey cat with blue eyes, wearing a bowtie, acrylic painting"
+    ]
+
+    num_inference_steps = 50
+    for i, prompt in enumerate(prompts):
+        input_prompts = [prompt] * batch_size
+        torch.cuda.synchronize()
+        inference_start = time.time()
+        image = pipe(input_prompts, height, width, num_inference_steps).images[0]
+        torch.cuda.synchronize()
+        inference_end = time.time()
+
+        print(f"Inference took {inference_end - inference_start} seconds")
+        image.save(f"torch_{i}.jpg")
 
 
-def run_ort(directory, provider):
+def run_ort(directory, provider, batch_size):
     load_start = time.time()
     pipe = get_ort_pipeline(directory, provider)
     load_end = time.time()
     print(f"Model loading took {load_end - load_start} seconds")
-    run_pipeline(pipe)
+    run_ort_pipeline(pipe, batch_size)
 
 
-def run_torch(disable_conv_algo_search, precision):
+def run_torch(disable_conv_algo_search, precision, batch_size):
     import torch
 
     if not disable_conv_algo_search:
         torch.backends.cudnn.enabled = True
         torch.backends.cudnn.benchmark = True
+    #torch.backends.cuda.matmul.allow_tf32 = True
 
     load_start = time.time()
-    pipe = get_torch_pipeline(precision)
+    #pipe = get_torch_pipeline(precision)
+    pipe = get_torch_pipeline_v2()
     load_end = time.time()
     print(f"Model loading took {load_end - load_start} seconds")
 
-    with torch.autocast("cuda"):
-        run_pipeline(pipe)
+    with torch.inference_mode():
+        run_torch_pipeline(pipe, batch_size)
 
 
 def parse_arguments():
@@ -133,6 +272,13 @@ def parse_arguments():
         help="Floating point precision of model",
     )
 
+    parser.add_argument(
+        "-b",
+        "--batch_size",
+        type=int,
+        default=1
+    )
+
     args = parser.parse_args()
     return args
 
@@ -151,10 +297,9 @@ def main():
                 # "CPUExecutionProvider",
             ]
         )
-        run_ort(args.pipeline, provider)
+        run_ort(args.pipeline, provider, args.batch_size)
     else:
-        run_torch(args.disable_conv_algo_search, args.floating_point_precision)
-
+        run_torch(args.disable_conv_algo_search, args.floating_point_precision, args.batch_size)
 
 if __name__ == "__main__":
     main()
