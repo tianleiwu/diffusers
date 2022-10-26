@@ -232,6 +232,9 @@ def run_torch(disable_conv_algo_search, batch_size, disable_channels_last, torch
         torch.backends.cudnn.benchmark = True
     #torch.backends.cuda.matmul.allow_tf32 = True
 
+    # torch disable grad
+    torch.set_grad_enabled(False)
+    
     load_start = time.time()
     if torchscript:
         pipe = get_torchscript_pipeline(disable_channels_last)
