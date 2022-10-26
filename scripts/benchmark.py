@@ -232,6 +232,9 @@ def run_torch(disable_conv_algo_search, mode, batch_size):
         torch.backends.cudnn.enabled = True
         torch.backends.cudnn.benchmark = True
 
+    # torch disable grad
+    torch.set_grad_enabled(False)
+    
     load_start = time.time()
     pipe = get_torch_pipeline()
     load_end = time.time()
