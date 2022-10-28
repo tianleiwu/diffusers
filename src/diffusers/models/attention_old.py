@@ -12,35 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import math
-import os
-from inspect import isfunction
-from typing import Any, Optional
+from typing import Optional
 
 import torch
 import torch.nn.functional as F
 from torch import nn
-
-from diffusers.utils.import_utils import is_xformers_available
-
-
-if is_xformers_available():
-    import xformers
-    import xformers.ops
-
-    _USE_MEMORY_EFFICIENT_ATTENTION = int(os.environ.get("USE_MEMORY_EFFICIENT_ATTENTION", 0)) == 1
-else:
-    xformers = None
-    _USE_MEMORY_EFFICIENT_ATTENTION = False
-
-
-def exists(val):
-    return val is not None
-
-
-def default(val, d):
-    if exists(val):
-        return val
-    return d() if isfunction(d) else d
 
 
 class AttentionBlock(nn.Module):
@@ -214,12 +190,11 @@ class BasicTransformerBlock(nn.Module):
         checkpoint: bool = True,
     ):
         super().__init__()
-        AttentionBuilder = MemoryEfficientCrossAttention if _USE_MEMORY_EFFICIENT_ATTENTION else CrossAttention
-        self.attn1 = AttentionBuilder(
+        self.attn1 = CrossAttention(
             query_dim=dim, heads=n_heads, dim_head=d_head, dropout=dropout
         )  # is a self-attention
         self.ff = FeedForward(dim, dropout=dropout, glu=gated_ff)
-        self.attn2 = AttentionBuilder(
+        self.attn2 = CrossAttention(
             query_dim=dim, context_dim=context_dim, heads=n_heads, dim_head=d_head, dropout=dropout
         )  # is self-attn if context is none
         self.norm1 = nn.LayerNorm(dim)
@@ -232,57 +207,11 @@ class BasicTransformerBlock(nn.Module):
         self.attn2._slice_size = slice_size
 
     def forward(self, hidden_states, context=None):
+        hidden_states = hidden_states.contiguous() if hidden_states.device.type == "mps" else hidden_states
         hidden_states = self.attn1(self.norm1(hidden_states)) + hidden_states
         hidden_states = self.attn2(self.norm2(hidden_states), context=context) + hidden_states
         hidden_states = self.ff(self.norm3(hidden_states)) + hidden_states
         return hidden_states
-
-
-class MemoryEfficientCrossAttention(nn.Module):
-    def __init__(self, query_dim, context_dim=None, heads=8, dim_head=64, dropout=0.0):
-        super().__init__()
-        inner_dim = dim_head * heads
-        context_dim = default(context_dim, query_dim)
-
-        self.heads = heads
-        self.dim_head = dim_head
-
-        self.to_q = nn.Linear(query_dim, inner_dim, bias=False)
-        self.to_k = nn.Linear(context_dim, inner_dim, bias=False)
-        self.to_v = nn.Linear(context_dim, inner_dim, bias=False)
-
-        self.to_out = nn.Sequential(nn.Linear(inner_dim, query_dim), nn.Dropout(dropout))
-        self.attention_op: Optional[Any] = None
-
-    def forward(self, x, context=None, mask=None):
-        q = self.to_q(x)
-        context = default(context, x)
-        k = self.to_k(context)
-        v = self.to_v(context)
-
-        b, _, _ = q.shape
-        q, k, v = map(
-            lambda t: t.unsqueeze(3)
-            .reshape(b, t.shape[1], self.heads, self.dim_head)
-            .permute(0, 2, 1, 3)
-            .reshape(b * self.heads, t.shape[1], self.dim_head)
-            .contiguous(),
-            (q, k, v),
-        )
-
-        # actually compute the attention, what we cannot get enough of
-        out = xformers.ops.memory_efficient_attention(q, k, v, attn_bias=None, op=self.attention_op)
-
-        # TODO: Use this directly in the attention operation, as a bias
-        if exists(mask):
-            raise NotImplementedError
-        out = (
-            out.unsqueeze(0)
-            .reshape(b, self.heads, out.shape[1], self.dim_head)
-            .permute(0, 2, 1, 3)
-            .reshape(b, out.shape[1], self.heads * self.dim_head)
-        )
-        return self.to_out(out)
 
 
 class CrossAttention(nn.Module):
@@ -359,19 +288,10 @@ class CrossAttention(nn.Module):
 
     def _attention(self, query, key, value):
         # TODO: use baddbmm for better performance
-        if query.device.type == "mps":
-            # Better performance on mps (~20-25%)
-            attention_scores = torch.einsum("b i d, b j d -> b i j", query, key) * self.scale
-        else:
-            attention_scores = torch.matmul(query, key.transpose(-1, -2)) * self.scale
+        attention_scores = torch.matmul(query, key.transpose(-1, -2)) * self.scale
         attention_probs = attention_scores.softmax(dim=-1)
         # compute attention output
-
-        if query.device.type == "mps":
-            hidden_states = torch.einsum("b i j, b j d -> b i d", attention_probs, value)
-        else:
-            hidden_states = torch.matmul(attention_probs, value)
-
+        hidden_states = torch.matmul(attention_probs, value)
         # reshape hidden_states
         hidden_states = self.reshape_batch_dim_to_heads(hidden_states)
         return hidden_states
@@ -385,21 +305,11 @@ class CrossAttention(nn.Module):
         for i in range(hidden_states.shape[0] // slice_size):
             start_idx = i * slice_size
             end_idx = (i + 1) * slice_size
-            if query.device.type == "mps":
-                # Better performance on mps (~20-25%)
-                attn_slice = (
-                    torch.einsum("b i d, b j d -> b i j", query[start_idx:end_idx], key[start_idx:end_idx])
-                    * self.scale
-                )
-            else:
-                attn_slice = (
-                    torch.matmul(query[start_idx:end_idx], key[start_idx:end_idx].transpose(1, 2)) * self.scale
-                )  # TODO: use baddbmm for better performance
+            attn_slice = (
+                torch.matmul(query[start_idx:end_idx], key[start_idx:end_idx].transpose(1, 2)) * self.scale
+            )  # TODO: use baddbmm for better performance
             attn_slice = attn_slice.softmax(dim=-1)
-            if query.device.type == "mps":
-                attn_slice = torch.einsum("b i j, b j d -> b i d", attn_slice, value[start_idx:end_idx])
-            else:
-                attn_slice = torch.matmul(attn_slice, value[start_idx:end_idx])
+            attn_slice = torch.matmul(attn_slice, value[start_idx:end_idx])
 
             hidden_states[start_idx:end_idx] = attn_slice
 
