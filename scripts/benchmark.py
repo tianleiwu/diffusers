@@ -43,14 +43,18 @@ def get_torch_pipeline(precision, unet_jit):
 
 
 def profile_pipeline(pipe, batch_size):
+    torch.backends.cudnn.benchmark = True
+
     height, width, num_inference_steps = 512, 512, 50
     prompts = ["a photo of an astronaut riding a horse on mars" for _ in range(batch_size)]
-    with torch.autocast("cuda"):
+    with torch.inference_mode():
         # Warm up
         pipe(prompts, height, width, num_inference_steps=5)
 
+        torch.cuda.synchronize()
         start = time.time()
         pipe(prompts, height, width, num_inference_steps)
+        torch.cuda.synchronize()
         end = time.time()
         latency = end - start
         print(f"Batch size = {batch_size}, latency = {latency} s, throughput = {batch_size / latency} queries/s")
