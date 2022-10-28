@@ -1,8 +1,10 @@
 import argparse
+import gc
 import os
 import time
+import torch
 
-from diffusers import OnnxStableDiffusionPipeline
+from diffusers import OnnxStableDiffusionPipeline, StableDiffusionPipeline
 
 
 def get_ort_pipeline(directory, provider):
@@ -29,52 +31,43 @@ def get_ort_pipeline(directory, provider):
 
 
 def get_torch_pipeline(precision, unet_jit):
-    from torch import float16
-    from diffusers import StableDiffusionPipeline
-
     if precision == "fp16":
         pipe = StableDiffusionPipeline.from_pretrained(
-            "CompVis/stable-diffusion-v1-4", torch_dtype=float16, revision=precision, use_auth_token=True
+            "CompVis/stable-diffusion-v1-4", torch_dtype=torch.float16, revision=precision, use_auth_token=True
         ).to("cuda")
         pipe.unet_jit = unet_jit
     else:
-        # pipe = StableDiffusionPipeline.from_pretrained(
-        #     "CompVis/stable-diffusion-v1-4", use_auth_token=True
-        # ).to("cuda")
         print("Skipping PyTorch FP32 for now")
         exit(1)
     return pipe
 
 
-def run_pipeline(pipe):
-    # Warm up
-    height = 512
-    width = 512
-    pipe("warm up", height, width, num_inference_steps=2)
+def profile_pipeline(pipe, batch_size):
+    height, width, num_inference_steps = 512, 512, 50
+    prompts = ["a photo of an astronaut riding a horse on mars" for _ in range(batch_size)]
+    with torch.autocast("cuda"):
+        # Warm up
+        pipe(prompts, height, width, num_inference_steps=5)
 
-    # Test inputs
-    prompts = [  
-        # "a photo of an astronaut riding a horse on mars",
-        "cute grey cat with blue eyes, wearing a bowtie, acrylic painting"
-    ]
+        start = time.time()
+        pipe(prompts, height, width, num_inference_steps)
+        end = time.time()
+        latency = end - start
+        print(f"Batch size = {batch_size}, latency = {latency} s, throughput = {batch_size / latency} queries/s")
 
-    num_inference_steps = 50
-    start = time.time()
-    pipe(prompts, height, width, num_inference_steps)
-    end = time.time()
-    print(f"Inference took {end - start} seconds")
+        # Garbage collect before measuring memory
+        from onnxruntime.transformers.benchmark_helper import measure_memory
+
+        gc.collect()
+        torch.cuda.empty_cache()
+        measure_memory(is_gpu=True, func=lambda: pipe(prompts, height, width, num_inference_steps))
 
 
-# Measure throughput at the maximum batch size
-def measure_throughput(pipe):
+def find_max_batch_size(pipe):
     # Warm up
     height, width = 512, 512
-    pipe("warm up", height, width, num_inference_steps=2)
-
     num_inference_steps = 50
     min_batch_size, max_batch_size = 1, 1024
-    
-    # Search for maximum batch size
     while (min_batch_size <= max_batch_size):
         if isinstance(pipe, OnnxStableDiffusionPipeline):
             # Iterative search for maximum batch size
@@ -87,9 +80,10 @@ def measure_throughput(pipe):
         try:
             prompts = ["a photo of an astronaut riding a horse on mars" for _ in range(batch_size)]
             start = time.time()
-            pipe(prompts, height, width, num_inference_steps=num_inference_steps)
+            pipe(prompts, height, width, num_inference_steps)
             end = time.time()
-            print(f"Batch size = {batch_size}, latency = {end - start} s, throughput = {(num_inference_steps * batch_size) / (end - start)} it/s")
+            latency = end - start
+            print(f"Batch size = {batch_size}, latency = {latency} s, throughput = {batch_size / latency} queries/s")
             
             print(f"Batch size = {batch_size} is too low. Refining search space for min batch size.")
             if isinstance(pipe, OnnxStableDiffusionPipeline):
@@ -103,57 +97,23 @@ def measure_throughput(pipe):
     print(f"Search is complete. Max batch size = {max_batch_size}.")
 
 
-def profile_memory(pipe, max_batch_size, height=512, width=512, num_inference_steps=50):
-    from onnxruntime.transformers.benchmark_helper import measure_memory
-    from torch.cuda import empty_cache
-    from gc import collect
-
-    # Garbage collect before measuring
-    collect()
-    empty_cache()
-
-    print("Measuring memory usage at batch size = 1:")
-    prompts = ["a photo of an astronaut riding a horse on mars"]
-    measure_memory(is_gpu=True, func=lambda: pipe(prompts, height, width, num_inference_steps=num_inference_steps))
-
-    # Garbage collect before measuring
-    collect()
-    empty_cache()
-
-    print(f"Measuring memory usage at max batch size = {max_batch_size}:")
-    prompts = ["a photo of an astronaut riding a horse on mars" for _ in range(max_batch_size)]
-    measure_memory(is_gpu=True, func=lambda: pipe(prompts, height, width, num_inference_steps=num_inference_steps))
-
-
-def choose_metric(pipe, metric, max_batch_size):
-    assert metric in {"latency", "throughput", "memory"}
-
-    if metric == "latency":
-        if isinstance(pipe, OnnxStableDiffusionPipeline):
-            run_pipeline(pipe)
-        else:
-            with torch.autocast("cuda"):
-                run_pipeline(pipe)
-    
-    elif metric == "throughput":
-        measure_throughput(pipe)
-
+def choose_mode(pipe, mode, batch_size):
+    if mode == "benchmark":
+        assert batch_size > 0
+        profile_pipeline(pipe, batch_size)
     else:
-        assert max_batch_size > 0
-        profile_memory(pipe, max_batch_size)
+        find_max_batch_size(pipe)
 
 
-def run_ort(directory, provider, metric, max_batch_size):
+def run_ort(directory, provider, mode, batch_size):
     load_start = time.time()
     pipe = get_ort_pipeline(directory, provider)
     load_end = time.time()
     print(f"Model loading took {load_end - load_start} seconds")
-    choose_metric(pipe, metric, max_batch_size)
+    choose_mode(pipe, mode, batch_size)
 
 
-def run_torch(disable_conv_algo_search, precision, unet_jit, metric, max_batch_size):
-    import torch
-
+def run_torch(disable_conv_algo_search, precision, unet_jit, mode, batch_size):
     if not disable_conv_algo_search:
         torch.backends.cudnn.enabled = True
         torch.backends.cudnn.benchmark = True
@@ -162,7 +122,7 @@ def run_torch(disable_conv_algo_search, precision, unet_jit, metric, max_batch_s
     pipe = get_torch_pipeline(precision, unet_jit)
     load_end = time.time()
     print(f"Model loading took {load_end - load_start} seconds")
-    choose_metric(pipe, metric, max_batch_size)
+    choose_mode(pipe, mode, batch_size)
 
 
 def parse_arguments():
@@ -216,20 +176,19 @@ def parse_arguments():
 
     parser.add_argument(
         "-b",
-        "--max_batch_size",
+        "--batch_size",
         required=False,
         type=int,
         default=0,
-        help="Maximum batch size found during search when measuring throughput (required when metric is 'memory')",
     )
 
     parser.add_argument(
         "-m",
-        "--metric",
+        "--mode",
         required=True,
         type=str,
-        help="Metric to evaluate pipeline on",
-        choices=["latency", "throughput", "memory"]
+        help="Mode to evaluate pipeline on",
+        choices=["benchmark", "search"]
     )
 
     args = parser.parse_args()
@@ -250,9 +209,9 @@ def main():
                 #"CPUExecutionProvider",
             ]
         )
-        run_ort(args.pipeline, provider, args.metric, args.max_batch_size)
+        run_ort(args.pipeline, provider, args.mode, args.batch_size)
     else:
-        run_torch(args.disable_conv_algo_search, args.floating_point_precision, args.unet_jit, args.metric, args.max_batch_size)
+        run_torch(args.disable_conv_algo_search, args.floating_point_precision, args.unet_jit, args.mode, args.batch_size)
 
 
 if __name__ == "__main__":
