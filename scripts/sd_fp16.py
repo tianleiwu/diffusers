@@ -6,16 +6,20 @@
 # 2) This script needs to be located in the same folder as the parent folder to the FP32 files.
 ################################################################################################
 
+import argparse
 import os
 import shutil
 import onnx
 from onnxruntime.transformers.optimizer import optimize_model
 
-# root directory of the onnx pipeline data files
-root_dir = "./sd_onnx_v4"
+parser = argparse.ArgumentParser()
+parser.add_argument('--root_dir', required=True, 
+                    help="Root directory of the ONNX pipeline data files (ex: ./sd_onnx_v4). \
+                          Must be located in the same folder as the parent folder to the FP32 files.")
+args = parser.parse_args()
 
 for name in ["unet", "vae_encoder", "vae_decoder", "text_encoder", "safety_checker"]:
-    onnx_model_path = f"{root_dir}/{name}/model.onnx"
+    onnx_model_path = f"{args.root_dir}/{name}/model.onnx"
 
     # The following will fuse LayerNormalization and Gelu. Do it before fp16 conversion, otherwise they cannot be fused later.
     # Right now, onnxruntime does not save >2GB model so we use script to optimize unet instead.
@@ -37,7 +41,7 @@ for name in ["unet", "vae_encoder", "vae_decoder", "text_encoder", "safety_check
         m.convert_float_to_float16()
 
     # Overwrite existing models. You can change it to another directory but need copy other files like tokenizer manually.
-    optimized_model_path = f"{root_dir}/{name}/model.onnx"
+    optimized_model_path = f"{args.root_dir}/{name}/model.onnx"
     output_dir = os.path.dirname(optimized_model_path)
     shutil.rmtree(output_dir)
     os.mkdir(output_dir)
