@@ -6,6 +6,7 @@ import torch
 
 from diffusers import OnnxStableDiffusionPipeline, StableDiffusionPipeline
 
+MODEL_NAME = "CompVis/stable-diffusion-v1-4"
 
 def get_ort_pipeline(directory, provider):
     import onnxruntime
@@ -22,7 +23,7 @@ def get_ort_pipeline(directory, provider):
 
     # Original FP32 ONNX models
     pipe = OnnxStableDiffusionPipeline.from_pretrained(
-        "CompVis/stable-diffusion-v1-4",
+        MODEL_NAME,
         revision="onnx",
         provider=provider,
         use_auth_token=True,
@@ -30,16 +31,125 @@ def get_ort_pipeline(directory, provider):
     return pipe
 
 
-def get_torch_pipeline(precision, unet_jit):
-    if precision == "fp16":
-        pipe = StableDiffusionPipeline.from_pretrained(
-            "CompVis/stable-diffusion-v1-4", torch_dtype=torch.float16, revision=precision, use_auth_token=True
-        ).to("cuda")
-        pipe.unet_jit = unet_jit
-    else:
-        print("Skipping PyTorch FP32 for now")
-        exit(1)
+def get_torch_pipeline():
+    pipe = StableDiffusionPipeline.from_pretrained(
+        MODEL_NAME, 
+        revision="fp16",
+        torch_dtype=torch.float16, 
+        use_auth_token=True,
+    ).to("cuda")
     return pipe
+
+
+def get_torchscript_pipeline(disable_channels_last):
+    trace_unet(disable_channels_last)
+    filename = get_trace_file(disable_channels_last)
+
+    from dataclasses import dataclass
+    @dataclass
+    class UNet2DConditionOutput:
+        sample: torch.FloatTensor
+
+    pipe = StableDiffusionPipeline.from_pretrained(
+        MODEL_NAME,
+        revision="fp16",
+        torch_dtype=torch.float16,
+        use_auth_token=True,
+    ).to("cuda")
+
+    # use jitted unet
+    unet_traced = torch.jit.load(filename)
+    # del pipe.unet
+    class TracedUNet(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.in_channels = pipe.unet.in_channels
+            self.device = pipe.unet.device
+
+        def forward(self, latent_model_input, t, encoder_hidden_states):
+            sample = unet_traced(latent_model_input, t, encoder_hidden_states)[0]
+            return UNet2DConditionOutput(sample=sample)
+
+    pipe.unet = TracedUNet()
+    print(pipe.scheduler)
+    return pipe
+
+
+def get_trace_file(disable_channels_last):
+    return "unet_traced_channels_last.pt" if not disable_channels_last else "unet_traced.pt"
+
+
+def trace_unet(disable_channels_last):
+    filename = get_trace_file(disable_channels_last)
+    if os.path.exists(filename):
+        print("Skip tracing since file exists.")
+        return
+
+    import functools
+
+    # torch disable grad
+    torch.set_grad_enabled(False)
+
+    # set variables
+    n_experiments = 2
+    unet_runs_per_experiment = 50
+
+    # load inputs
+    def generate_inputs():
+        sample = torch.randn(2, 4, 64, 64).half().cuda()
+        timestep = torch.rand(1).half().cuda() * 999
+        encoder_hidden_states = torch.randn(2, 77, 768).half().cuda()
+        return sample, timestep, encoder_hidden_states
+
+    pipe = StableDiffusionPipeline.from_pretrained(
+        MODEL_NAME,
+        revision="fp16",
+        torch_dtype=torch.float16,
+        use_auth_token=True,
+    ).to("cuda")
+
+    unet = pipe.unet
+    unet.eval()
+    if not disable_channels_last:
+        unet.to(memory_format=torch.channels_last) # use channels_last memory format
+    unet.forward = functools.partial(unet.forward, return_dict=False) # set return_dict=False as default
+
+    # warmup
+    for _ in range(5):
+        with torch.inference_mode():
+            inputs = generate_inputs()
+            orig_output = unet(*inputs)
+
+    # trace
+    print("Tracing...")
+    unet_traced = torch.jit.trace(unet, inputs)
+    unet_traced.eval()
+    print("Done tracing")
+
+    # warmup and optimize graph
+    for _ in range(5):
+        with torch.inference_mode():
+            inputs = generate_inputs()
+            orig_output = unet_traced(*inputs)
+
+    with torch.inference_mode():
+        for _ in range(n_experiments):
+            torch.cuda.synchronize()
+            start_time = time.time()
+            for _ in range(unet_runs_per_experiment):
+                orig_output = unet_traced(*inputs)
+            torch.cuda.synchronize()
+            print(f"Unet traced inference took {time.time() - start_time:.2f} seconds")
+        for _ in range(n_experiments):
+            torch.cuda.synchronize()
+            start_time = time.time()
+            for _ in range(unet_runs_per_experiment):
+                orig_output = unet(*inputs)
+            torch.cuda.synchronize()
+            print(f"Unet inference took {time.time() - start_time:.2f} seconds")
+
+    # save the model
+    unet_traced.save(filename)
 
 
 def profile_pipeline(pipe, batch_size):
@@ -117,13 +227,21 @@ def run_ort(directory, provider, mode, batch_size):
     choose_mode(pipe, mode, batch_size)
 
 
-def run_torch(disable_conv_algo_search, precision, unet_jit, mode, batch_size):
+def run_torch(disable_conv_algo_search, mode, batch_size):
     if not disable_conv_algo_search:
         torch.backends.cudnn.enabled = True
         torch.backends.cudnn.benchmark = True
 
     load_start = time.time()
-    pipe = get_torch_pipeline(precision, unet_jit)
+    pipe = get_torch_pipeline()
+    load_end = time.time()
+    print(f"Model loading took {load_end - load_start} seconds")
+    choose_mode(pipe, mode, batch_size)
+
+
+def run_torchscript(disable_channels_last, mode, batch_size):
+    load_start = time.time()
+    pipe = get_torchscript_pipeline(disable_channels_last)
     load_end = time.time()
     print(f"Model loading took {load_end - load_start} seconds")
     choose_mode(pipe, mode, batch_size)
@@ -138,7 +256,7 @@ def parse_arguments():
         required=False,
         type=str,
         default="onnxruntime",
-        choices=["onnxruntime", "torch"],
+        choices=["onnxruntime", "torch", "torchscript"],
         help="Engines to benchmark",
     )
 
@@ -152,7 +270,7 @@ def parse_arguments():
     )
 
     parser.add_argument(
-        "-d",
+        "-a",
         "--disable_conv_algo_search",
         required=False,
         action="store_true",
@@ -161,22 +279,13 @@ def parse_arguments():
     parser.set_defaults(disable_conv_algo_search=False)
 
     parser.add_argument(
-        "-f",
-        "--floating_point_precision",
-        required=False,
-        type=str,
-        default="fp16",
-        help="Floating point precision of model",
-    )
-
-    parser.add_argument(
-        "-u",
-        "--unet_jit",
+        "-c",
+        "--disable_channels_last",
         required=False,
         action="store_true",
-        help="Use unet torchscript",
+        help="Disable channels last (for TorchScript)",
     )
-    parser.set_defaults(unet_jit=False)
+    parser.set_defaults(disable_channels_last=False)
 
     parser.add_argument(
         "-b",
@@ -214,8 +323,10 @@ def main():
             ]
         )
         run_ort(args.pipeline, provider, args.mode, args.batch_size)
+    elif args.engine == "torch":
+        run_torch(args.disable_conv_algo_search, args.mode, args.batch_size)
     else:
-        run_torch(args.disable_conv_algo_search, args.floating_point_precision, args.unet_jit, args.mode, args.batch_size)
+        run_torchscript(args.disable_channels_last, args.mode, args.batch_size)
 
 
 if __name__ == "__main__":
