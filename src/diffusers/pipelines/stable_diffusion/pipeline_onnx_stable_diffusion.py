@@ -16,7 +16,7 @@ from .cuda_profiler import CudaProfiler
 from .timer import Timer
 
 _CUDA_PROFILER = CudaProfiler()  # TODO: Remove profiler
-
+ENABLE_PROFILER = False
 
 logger = logging.get_logger(__name__)
 
@@ -150,28 +150,41 @@ class OnnxStableDiffusionPipeline(DiffusionPipeline):
         do_classifier_free_guidance = guidance_scale > 1.0
         # get unconditional embeddings for classifier free guidance
         if do_classifier_free_guidance:
-            with timer.child("embeddings_for_guidance"):
-                max_length = text_input.input_ids.shape[-1]
+            with timer.child("classifier_free_guidance"):
+                uncond_tokens: List[str]
+                if negative_prompt is None:
+                    uncond_tokens = [""] * batch_size
+                elif type(prompt) is not type(negative_prompt):
+                    raise TypeError(
+                        f"`negative_prompt` should be the same type to `prompt`, but got {type(negative_prompt)} !="
+                        f" {type(prompt)}."
+                    )
+                elif isinstance(negative_prompt, str):
+                    uncond_tokens = [negative_prompt] * batch_size
+                elif batch_size != len(negative_prompt):
+                    raise ValueError(
+                        f"`negative_prompt`: {negative_prompt} has batch size {len(negative_prompt)}, but `prompt`:"
+                        f" {prompt} has batch size {batch_size}. Please make sure that passed `negative_prompt` matches"
+                        " the batch size of `prompt`."
+                    )
+                else:
+                    uncond_tokens = negative_prompt
+
+                max_length = text_input_ids.shape[-1]
                 uncond_input = self.tokenizer(
-                    [""] * batch_size, padding="max_length", max_length=max_length, return_tensors="np"
+                    uncond_tokens,
+                    padding="max_length",
+                    max_length=max_length,
+                    truncation=True,
+                    return_tensors="np",
                 )
                 uncond_embeddings = self.text_encoder(input_ids=uncond_input.input_ids.astype(np.int32))[0]
+                uncond_embeddings = np.repeat(uncond_embeddings, num_images_per_prompt, axis=0)
 
-            max_length = text_input_ids.shape[-1]
-            uncond_input = self.tokenizer(
-                uncond_tokens,
-                padding="max_length",
-                max_length=max_length,
-                truncation=True,
-                return_tensors="np",
-            )
-            uncond_embeddings = self.text_encoder(input_ids=uncond_input.input_ids.astype(np.int32))[0]
-            uncond_embeddings = np.repeat(uncond_embeddings, num_images_per_prompt, axis=0)
-
-            # For classifier free guidance, we need to do two forward passes.
-            # Here we concatenate the unconditional and text embeddings into a single batch
-            # to avoid doing two forward passes
-            text_embeddings = np.concatenate([uncond_embeddings, text_embeddings])
+                # For classifier free guidance, we need to do two forward passes.
+                # Here we concatenate the unconditional and text embeddings into a single batch
+                # to avoid doing two forward passes
+                text_embeddings = np.concatenate([uncond_embeddings, text_embeddings])
 
         # get the initial random noise unless the user supplied it
         latents_dtype = text_embeddings.dtype
@@ -200,11 +213,17 @@ class OnnxStableDiffusionPipeline(DiffusionPipeline):
             latent_model_input = np.concatenate([latents] * 2) if do_classifier_free_guidance else latents
             latent_model_input = self.scheduler.scale_model_input(latent_model_input, t)
 
+            if ENABLE_PROFILER and i == 10:
+                _CUDA_PROFILER.start()  # TODO: Remove profiler
+
             # predict the noise residual
             with timer.child("unet"):
                 noise_pred = self.unet(
                     sample=latent_model_input, timestep=np.array([t]), encoder_hidden_states=text_embeddings
                 )
+
+            if ENABLE_PROFILER and i == 10:
+                _CUDA_PROFILER.stop()  # TODO: Remove profiler
 
             noise_pred = noise_pred[0]
 
@@ -213,39 +232,44 @@ class OnnxStableDiffusionPipeline(DiffusionPipeline):
                 noise_pred_uncond, noise_pred_text = np.split(noise_pred, 2)
                 noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_text - noise_pred_uncond)
 
-            # compute the previous noisy sample x_t -> x_t-1
-            latents = self.scheduler.step(noise_pred, t, latents, **extra_step_kwargs).prev_sample
-            latents = np.array(latents)
+            with timer.child("scheduler"):
+                # compute the previous noisy sample x_t -> x_t-1
+                latents = self.scheduler.step(noise_pred, t, latents, **extra_step_kwargs).prev_sample
+                latents = np.array(latents)
 
             # call the callback, if provided
             if callback is not None and i % callback_steps == 0:
                 callback(i, t, latents)
 
-        latents = 1 / 0.18215 * latents
-        # image = self.vae_decoder(latent_sample=latents)[0]
-        # it seems likes there is a strange result for using half-precision vae decoder if batchsize>1
-        image = np.concatenate(
-            [self.vae_decoder(latent_sample=latents[i : i + 1])[0] for i in range(latents.shape[0])]
-        )
+        # scale and decode the image latents with vae
+        with timer.child("vae_decoder"):
+            latents = 1 / 0.18215 * latents
+            # image = self.vae_decoder(latent_sample=latents)[0]
+            # it seems likes there is a strange result for using half-precision vae decoder if batchsize>1
+            image = np.concatenate(
+                [self.vae_decoder(latent_sample=latents[i : i + 1])[0] for i in range(latents.shape[0])]
+            )
 
-        image = np.clip(image / 2 + 0.5, 0, 1)
-        image = image.transpose((0, 2, 3, 1))
+        with timer.child("image transpose"):
+            image = np.clip(image / 2 + 0.5, 0, 1)
+            image = image.transpose((0, 2, 3, 1))
 
-        if self.safety_checker is not None:
-            safety_checker_input = self.feature_extractor(
-                self.numpy_to_pil(image), return_tensors="np"
-            ).pixel_values.astype(image.dtype)
-            # There will throw an error if use safety_checker batchsize>1
-            images, has_nsfw_concept = [], []
-            for i in range(image.shape[0]):
-                image_i, has_nsfw_concept_i = self.safety_checker(
-                    clip_input=safety_checker_input[i : i + 1], images=image[i : i + 1]
-                )
-                images.append(image_i)
-                has_nsfw_concept.append(has_nsfw_concept_i[0])
-            image = np.concatenate(images)
-        else:
-            has_nsfw_concept = None
+        with timer.child("safety_checker"):
+            if self.safety_checker is not None:
+                safety_checker_input = self.feature_extractor(
+                    self.numpy_to_pil(image), return_tensors="np"
+                ).pixel_values.astype(image.dtype)
+                # There will throw an error if use safety_checker batchsize>1
+                images, has_nsfw_concept = [], []
+                for i in range(image.shape[0]):
+                    image_i, has_nsfw_concept_i = self.safety_checker(
+                        clip_input=safety_checker_input[i : i + 1], images=image[i : i + 1]
+                    )
+                    images.append(image_i)
+                    has_nsfw_concept.append(has_nsfw_concept_i[0])
+                image = np.concatenate(images)
+            else:
+                has_nsfw_concept = None
 
         if output_type == "pil":
             with timer.child("numpy_to_pil"):
