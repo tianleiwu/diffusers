@@ -14,7 +14,7 @@ from onnxruntime.transformers.optimizer import optimize_model
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--root_dir', required=True, 
-                    help="Root directory of the ONNX pipeline data files (ex: ./sd_onnx_v4). \
+                    help="Root directory of the ONNX pipeline data files (ex: ./sd_onnx_v4/sd_onnx_v4_fp32). \
                           Must be located in the same folder as the parent folder to the FP32 files.")
 args = parser.parse_args()
 

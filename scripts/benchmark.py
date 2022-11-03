@@ -273,6 +273,16 @@ def parse_arguments():
     )
 
     parser.add_argument(
+        "-ep",
+        "--provider",
+        required=False,
+        type=str,
+        default="cuda",
+        choices=["cuda", "trt", "cpu"],
+        help="Execution provider of ONNX pipeline"
+    )
+
+    parser.add_argument(
         "-a",
         "--disable_conv_algo_search",
         required=False,
@@ -313,19 +323,21 @@ def parse_arguments():
 
 def main():
     args = parse_arguments()
+    print(args.__dict__)
+
     if args.engine == "onnxruntime":
-        provider = (
-            ["CUDAExecutionProvider"]
-            if args.disable_conv_algo_search
-            else [
+        providers = {"cuda": "CUDAExecutionProvider", "trt": "TensorrtExecutionProvider", "cpu": "CPUExecutionProvider"}
+        args.provider = providers[args.provider]
+        if args.provider == "CUDAExecutionProvider" and args.disable_conv_algo_search:
+            args.provider = [
                 (
-                    "CUDAExecutionProvider",
+                    args.provider,
                     {"cudnn_conv_use_max_workspace": "1", "cudnn_conv_algo_search": "EXHAUSTIVE"},
                 ),
-                #"CPUExecutionProvider",
             ]
-        )
-        run_ort(args.pipeline, provider, args.mode, args.batch_size)
+        else:
+            args.provider = [args.provider]
+        run_ort(args.pipeline, args.provider, args.mode, args.batch_size)
     elif args.engine == "torch":
         run_torch(args.disable_conv_algo_search, args.mode, args.batch_size)
     else:
