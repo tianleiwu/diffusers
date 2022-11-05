@@ -269,7 +269,8 @@ def parse_arguments():
         required=False,
         type=str,
         default=None,
-        help="Directory of saved onnx pipeline for CompVis/stable-diffusion-v1-4.",
+        help="Directory of saved onnx pipeline for CompVis/stable-diffusion-v1-4. \
+              Directory name should specify the floating point precision used (fp16 or fp32)",
     )
 
     parser.add_argument(
@@ -335,6 +336,9 @@ def main():
                     {"cudnn_conv_use_max_workspace": "1", "cudnn_conv_algo_search": "EXHAUSTIVE"},
                 ),
             ]
+        elif args.provider == "TensorrtExecutionProvider":
+            args.provider = [args.provider, providers["cuda"]]
+            os.environ['ORT_TENSORRT_FP16_ENABLE'] = str(int("fp16" in args.pipeline))
         else:
             args.provider = [args.provider]
         run_ort(args.pipeline, args.provider, args.mode, args.batch_size)
