@@ -265,7 +265,9 @@ class UNet2DConditionModel(ModelMixin, ConfigMixin):
 
         # 0. center input if necessary
         if self.config.center_input_sample:
+            print("passed 0a")
             sample = 2 * sample - 1.0
+            print("passed 0b")
 
         # 1. time
         timesteps = timestep
@@ -287,7 +289,9 @@ class UNet2DConditionModel(ModelMixin, ConfigMixin):
         emb = self.time_embedding(t_emb)
 
         # 2. pre-process
+        print("passed 1")
         sample = self.conv_in(sample)
+        print("passed 2")
 
         # 3. down
         down_block_res_samples = (sample,)
@@ -298,13 +302,17 @@ class UNet2DConditionModel(ModelMixin, ConfigMixin):
                     temb=emb,
                     encoder_hidden_states=encoder_hidden_states,
                 )
+                print("passed 3a")
             else:
                 sample, res_samples = downsample_block(hidden_states=sample, temb=emb)
+                print("passed 3b")
 
             down_block_res_samples += res_samples
 
         # 4. mid
+        print("passed 3")
         sample = self.mid_block(sample, emb, encoder_hidden_states=encoder_hidden_states)
+        print("passed 4")
 
         # 5. up
         for i, upsample_block in enumerate(self.up_blocks):
@@ -326,14 +334,21 @@ class UNet2DConditionModel(ModelMixin, ConfigMixin):
                     encoder_hidden_states=encoder_hidden_states,
                     upsample_size=upsample_size,
                 )
+                print("passed 5a")
             else:
                 sample = upsample_block(
                     hidden_states=sample, temb=emb, res_hidden_states_tuple=res_samples, upsample_size=upsample_size
                 )
+                print("passed 5b")
+
         # 6. post-process
+        print("passed 5")
         sample = self.conv_norm_out(sample)
+        print("passed 6a")
         sample = self.conv_act(sample)
+        print("passed 6b")
         sample = self.conv_out(sample)
+        print("passed 6c")
 
         if not return_dict:
             return (sample,)

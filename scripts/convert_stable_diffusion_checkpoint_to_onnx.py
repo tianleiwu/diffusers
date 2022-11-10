@@ -35,8 +35,8 @@ def onnx_export(
     output_path: Path,
     ordered_input_names,
     output_names,
-    dynamic_axes,
-    opset,
+    dynamic_axes=None,
+    opset=14,
     use_external_data_format=False,
 ):
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -49,7 +49,7 @@ def onnx_export(
             f=output_path.as_posix(),
             input_names=ordered_input_names,
             output_names=output_names,
-            dynamic_axes=dynamic_axes,
+            #dynamic_axes=dynamic_axes,
             do_constant_folding=True,
             use_external_data_format=use_external_data_format,
             enable_onnx_checker=True,
@@ -62,7 +62,7 @@ def onnx_export(
             f=output_path.as_posix(),
             input_names=ordered_input_names,
             output_names=output_names,
-            dynamic_axes=dynamic_axes,
+            #dynamic_axes=dynamic_axes,
             do_constant_folding=True,
             opset_version=opset,
         )
@@ -95,9 +95,9 @@ def convert_models(model_path: str, output_path: str, opset: int, fp16: bool = F
         output_path=output_path / "text_encoder" / "model.onnx",
         ordered_input_names=["input_ids"],
         output_names=["last_hidden_state", "pooler_output"],
-        dynamic_axes={
-            "input_ids": {0: "batch", 1: "sequence"},
-        },
+        #dynamic_axes={
+        #    "input_ids": {0: "batch", 1: "sequence"},
+        #},
         opset=opset,
     )
     del pipeline.text_encoder
@@ -115,11 +115,11 @@ def convert_models(model_path: str, output_path: str, opset: int, fp16: bool = F
         output_path=unet_path,
         ordered_input_names=["sample", "timestep", "encoder_hidden_states", "return_dict"],
         output_names=["out_sample"],  # has to be different from "sample" for correct tracing
-        dynamic_axes={
-            "sample": {0: "batch", 1: "channels", 2: "height", 3: "width"},
-            "timestep": {0: "batch"},
-            "encoder_hidden_states": {0: "batch", 1: "sequence"},
-        },
+        #dynamic_axes={
+        #    "sample": {0: "batch", 1: "channels", 2: "height", 3: "width"},
+        #    "timestep": {0: "batch"},
+        #    "encoder_hidden_states": {0: "batch", 1: "sequence"},
+        #},
         opset=opset,
         use_external_data_format=True,  # UNet is > 2GB, so the weights need to be split
     )
@@ -150,9 +150,9 @@ def convert_models(model_path: str, output_path: str, opset: int, fp16: bool = F
         output_path=output_path / "vae_encoder" / "model.onnx",
         ordered_input_names=["sample", "return_dict"],
         output_names=["latent_sample"],
-        dynamic_axes={
-            "sample": {0: "batch", 1: "channels", 2: "height", 3: "width"},
-        },
+        #dynamic_axes={
+        #    "sample": {0: "batch", 1: "channels", 2: "height", 3: "width"},
+        #},
         opset=opset,
     )
 
@@ -166,9 +166,9 @@ def convert_models(model_path: str, output_path: str, opset: int, fp16: bool = F
         output_path=output_path / "vae_decoder" / "model.onnx",
         ordered_input_names=["latent_sample", "return_dict"],
         output_names=["sample"],
-        dynamic_axes={
-            "latent_sample": {0: "batch", 1: "channels", 2: "height", 3: "width"},
-        },
+        #dynamic_axes={
+        #    "latent_sample": {0: "batch", 1: "channels", 2: "height", 3: "width"},
+        #},
         opset=opset,
     )
     del pipeline.vae
@@ -185,10 +185,10 @@ def convert_models(model_path: str, output_path: str, opset: int, fp16: bool = F
         output_path=output_path / "safety_checker" / "model.onnx",
         ordered_input_names=["clip_input", "images"],
         output_names=["out_images", "has_nsfw_concepts"],
-        dynamic_axes={
-            "clip_input": {0: "batch", 1: "channels", 2: "height", 3: "width"},
-            "images": {0: "batch", 1: "height", 2: "width", 3: "channels"},
-        },
+        #dynamic_axes={
+        #    "clip_input": {0: "batch", 1: "channels", 2: "height", 3: "width"},
+        #    "images": {0: "batch", 1: "height", 2: "width", 3: "channels"},
+        #},
         opset=opset,
     )
     del pipeline.safety_checker

@@ -284,6 +284,15 @@ def parse_arguments():
     )
 
     parser.add_argument(
+        "-fp16_trt",
+        "--fp16_tensorrt",
+        required=False,
+        action="store_true",
+        help="Use FP16 when TensorRT is the execution provider",
+    )
+    parser.set_defaults(fp16_tensorrt=False)
+
+    parser.add_argument(
         "-a",
         "--disable_conv_algo_search",
         required=False,
@@ -338,7 +347,9 @@ def main():
             ]
         elif args.provider == "TensorrtExecutionProvider":
             args.provider = [args.provider, providers["cuda"]]
-            os.environ['ORT_TENSORRT_FP16_ENABLE'] = str(int("fp16" in args.pipeline))
+            os.environ['ORT_TENSORRT_FP16_ENABLE'] = str(int(args.fp16_tensorrt))
+            one_gb = 1073741824
+            os.environ['ORT_TENSORRT_MAX_WORKSPACE_SIZE'] = str(int(one_gb * 4))
         else:
             args.provider = [args.provider]
         run_ort(args.pipeline, args.provider, args.mode, args.batch_size)
