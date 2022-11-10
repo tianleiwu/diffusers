@@ -108,7 +108,7 @@ def convert_models(model_path: str, output_path: str, opset: int, fp16: bool = F
         pipeline.unet,
         model_args=(
             torch.randn(2, pipeline.unet.in_channels, 64, 64).to(device=device, dtype=dtype),
-            torch.LongTensor([0, 1]).to(device=device),
+            torch.LongTensor([1]).to(device=device),
             torch.randn(2, 77, 768).to(device=device, dtype=dtype),
             False,
         ),
