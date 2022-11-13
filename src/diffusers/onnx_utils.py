@@ -40,9 +40,28 @@ class OnnxRuntimeModel:
         self.model = model
         self.model_save_dir = kwargs.get("model_save_dir", None)
         self.latest_model_name = kwargs.get("latest_model_name", "model.onnx")
+        self.args = kwargs
 
     def __call__(self, **kwargs):
-        inputs = {k: np.array(v) for k, v in kwargs.items()}
+        # print(self.args)
+        batch_size = None
+        # for k, v in kwargs.items():
+        #     print("before", k, v.shape)
+
+        inputs = {}
+        for k, v in kwargs.items():
+            if batch_size == None:
+                batch_size = v.shape[0]
+                # print("batch size", batch_size)
+            if k == "timestep":
+                inputs[k] = np.array([v[0] for _ in range(batch_size)])
+            elif k == "images":
+                inputs[k] = np.zeros((1, 224, 224, 3)).astype(np.float32)
+            else:
+                inputs[k] = np.array(v)
+        # inputs = {k: np.array(v) if k != "timestep" else np.array([v[0], v[0]]) for k, v in kwargs.items()}
+        # for k, v in inputs.items():
+        #     print("after", k, v.shape)
         return self.model.run(None, inputs)
 
     @staticmethod
@@ -63,6 +82,7 @@ class OnnxRuntimeModel:
         # Allow setting like providers=[("CUDAExecutionProvider", {"cudnn_conv_use_max_workspace": '1', 'cudnn_conv_algo_search': 'EXHAUSTIVE'})]
         providers = provider if isinstance(provider, list) else [provider]
 
+        # print(path)
         return ort.InferenceSession(path, providers=providers, sess_options=sess_options)
 
     def _save_pretrained(self, save_directory: Union[str, Path], file_name: Optional[str] = None, **kwargs):

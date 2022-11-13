@@ -349,7 +349,7 @@ def main():
             args.provider = [args.provider, providers["cuda"]]
             os.environ['ORT_TENSORRT_FP16_ENABLE'] = str(int(args.fp16_tensorrt))
             one_gb = 1073741824
-            os.environ['ORT_TENSORRT_MAX_WORKSPACE_SIZE'] = str(int(one_gb * 4))
+            os.environ['ORT_TENSORRT_MAX_WORKSPACE_SIZE'] = str(int(one_gb * 3 * args.batch_size))
         else:
             args.provider = [args.provider]
         run_ort(args.pipeline, args.provider, args.mode, args.batch_size)
