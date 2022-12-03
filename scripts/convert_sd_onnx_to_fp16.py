@@ -10,10 +10,9 @@
 #    huggingface-cli login
 #    python3 scripts/convert_stable_diffusion_checkpoint_to_onnx.py --model_path runwayml/stable-diffusion-v1-5  --output_path ../stable-diffusion-v1-5
 #
-# Then you can use this script to convert them to float16, then run benchmark like the following:
+# Then you can use this script to convert them to float16 like the following:
 #    pip3 install -U onnxruntime-gpu
 #    python3 scripts/convert_sd_onnx_to_fp16.py -i ../stable-diffusion-v1-5 -o ../stable-diffusion-v1-5-fp16
-#    python3 scripts/benchmark.py -p ../stable-diffusion-v1.5-fp16/
 
 import argparse
 import os
