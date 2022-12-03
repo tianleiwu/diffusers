@@ -3,20 +3,17 @@
 # Licensed under the MIT License.
 # --------------------------------------------------------------------------
 
-# Before running this script, you need fetch float32 onnx models. There are two ways:
-# (1) Download like the following (It requires your huggingface user id and access token):
-#        git clone -b onnx https://huggingface.co/runwayml/stable-diffusion-v1-5/
-#     It uses git LFS (see https://docs.github.com/en/repositories/working-with-files/managing-large-files/installing-git-large-file-storage)
-# (2) Convert like the following:
+# Before running this script, you need convert checkpoint to float32 onnx models like the following
 #    git clone https://github.com/huggingface/diffusers
 #    cd diffusers
 #    pip install -e .
 #    huggingface-cli login
 #    python3 scripts/convert_stable_diffusion_checkpoint_to_onnx.py --model_path runwayml/stable-diffusion-v1-5  --output_path ../stable-diffusion-v1-5
 #
-# After float32 onnx models are ready, you can use this script to convert them to float16 like
+# Then you can use this script to convert them to float16, then run benchmark like the following:
 #    pip3 install -U onnxruntime-gpu
-#    python3 convert_sd_onnx_to_fp16.py -i ../stable-diffusion-v1-5 -o ../stable-diffusion-v1-5-fp16
+#    python3 scripts/convert_sd_onnx_to_fp16.py -i ../stable-diffusion-v1-5 -o ../stable-diffusion-v1-5-fp16
+#    python3 scripts/benchmark.py -p ../stable-diffusion-v1.5-fp16/
 
 import argparse
 import os
