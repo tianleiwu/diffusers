@@ -3,16 +3,18 @@
 # Licensed under the MIT License.
 # --------------------------------------------------------------------------
 
-# FP32 onnx model can be downloaded like the following:
-#    git clone https://huggingface.co/runwayml/stable-diffusion-v1-5/
-#    cd stable-diffusion-v1-5
-#    git checkout onnx
-# Or use script in diffusers like:
+# Before running this script, you need fetch float32 onnx models. There are two ways:
+# (1) Download like the following (It requires your huggingface user id and access token):
+#    git clone -b onnx https://huggingface.co/runwayml/stable-diffusion-v1-5/
+# (2) Convert like the following:
 #    git clone https://github.com/huggingface/diffusers
 #    cd diffusers
 #    pip install -e .
-#    python scripts/convert_stable_diffusion_checkpoint_to_onnx.py --model_path runwayml/stable-diffusion-v1-5  --output_path ./sd_onnx_1.5
-# Then you can use this script to conver the onnx models to float16
+#    huggingface-cli login
+#    python scripts/convert_stable_diffusion_checkpoint_to_onnx.py --model_path runwayml/stable-diffusion-v1-5  --output_path ./stable-diffusion-v1-5
+#
+# After float32 onnx models are ready, you can use this script to convert them to float16 like
+#    python convert_sd_onnx_to_fp16.py -i ./stable-diffusion-v1-5 -o ./stable-diffusion-v1-5-fp16
 
 import argparse
 import os
