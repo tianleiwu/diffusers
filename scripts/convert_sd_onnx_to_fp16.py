@@ -47,7 +47,7 @@ def convert_to_fp16(source_dir: Path, target_dir: Path, overwrite: bool, use_ext
             use_gpu=False,
         )
 
-        m.convert_float_to_float16(op_block_list=["RandomNormalLike"] if name == "vae_decoder" else None)
+        m.convert_float_to_float16(op_block_list=["RandomNormalLike", "Resize"])
 
         optimized_model_path = target_dir / name / "model.onnx"
         output_dir = optimized_model_path.parent
