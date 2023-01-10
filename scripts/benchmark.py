@@ -4,7 +4,8 @@ import time
 
 from diffusers import OnnxStableDiffusionPipeline
 
-MODEL_NAME = "CompVis/stable-diffusion-v1-4" #"runwayml/stable-diffusion-v1-5"
+MODEL_NAME = "runwayml/stable-diffusion-v1-5"
+
 
 def get_ort_pipeline(directory, provider):
     import onnxruntime
@@ -31,28 +32,29 @@ def get_ort_pipeline(directory, provider):
     return pipe
 
 
-def get_torch_pipeline(disable_channels_last):
+def get_torch_pipeline(disable_channels_last, enable_xformers=True):
     from torch import float16, channels_last
     from diffusers import StableDiffusionPipeline
 
-    pipe = StableDiffusionPipeline.from_pretrained(
-        MODEL_NAME, torch_dtype=float16, revision="fp16", use_auth_token=True
-    ).to("cuda")
+    pipe = StableDiffusionPipeline.from_pretrained(MODEL_NAME, torch_dtype=float16, use_auth_token=True).to("cuda")
 
-    #pipe.enable_attention_slicing()
+    if enable_xformers:
+        pipe.enable_xformers_memory_efficient_attention()
 
     if not disable_channels_last:
         pipe.unet.to(memory_format=channels_last)  # in-place operation
 
     return pipe
 
+
 def get_trace_file(disable_channels_last):
     return "unet_traced_channels_last.pt" if not disable_channels_last else "unet_traced.pt"
 
-def trace_unet(disable_channels_last):
+
+def trace_unet(disable_channels_last, enable_xformers=True):
     filename = get_trace_file(disable_channels_last)
-    if not os.path.exists(filename):
-        print("skip tracing since file existed.")
+    if os.path.exists(filename):
+        print("skip tracing since trace file existed: {filename}")
         return
 
     import time
@@ -74,12 +76,14 @@ def trace_unet(disable_channels_last):
         encoder_hidden_states = torch.randn(2, 77, 768).half().cuda()
         return sample, timestep, encoder_hidden_states
 
-
     pipe = StableDiffusionPipeline.from_pretrained(
         MODEL_NAME,
-        revision="fp16",
         torch_dtype=torch.float16,
     ).to("cuda")
+
+    if enable_xformers:
+        pipe.enable_xformers_memory_efficient_attention()
+
     unet = pipe.unet
     unet.eval()
     if not disable_channels_last:
@@ -98,13 +102,11 @@ def trace_unet(disable_channels_last):
     unet_traced.eval()
     print("done tracing")
 
-
     # warmup and optimize graph
     for _ in range(5):
         with torch.inference_mode():
             inputs = generate_inputs()
             orig_output = unet_traced(*inputs)
-
 
     # benchmarking
     with torch.inference_mode():
@@ -126,7 +128,8 @@ def trace_unet(disable_channels_last):
     # save the model
     unet_traced.save(filename)
 
-def load_traced(disable_channels_last):
+
+def load_traced(disable_channels_last, enable_xformers=True):
     filename = get_trace_file(disable_channels_last)
 
     from diffusers import StableDiffusionPipeline
@@ -139,9 +142,11 @@ def load_traced(disable_channels_last):
 
     pipe = StableDiffusionPipeline.from_pretrained(
         MODEL_NAME,
-        revision="fp16",
         torch_dtype=torch.float16,
     ).to("cuda")
+
+    if enable_xformers:
+        pipe.enable_xformers_memory_efficient_attention()
 
     # use jitted unet
     unet_traced = torch.jit.load(filename)
@@ -160,9 +165,11 @@ def load_traced(disable_channels_last):
     print(pipe.scheduler)
     return pipe
 
-def get_torchscript_pipeline(disable_channels_last):
-    trace_unet(disable_channels_last)
-    return load_traced(disable_channels_last)
+
+def get_torchscript_pipeline(disable_channels_last, enable_xformers):
+    trace_unet(disable_channels_last, enable_xformers)
+    return load_traced(disable_channels_last, enable_xformers)
+
 
 def run_ort_pipeline(pipe, batch_size):
     assert isinstance(pipe, OnnxStableDiffusionPipeline)
@@ -175,7 +182,7 @@ def run_ort_pipeline(pipe, batch_size):
     # Test inputs
     prompts = [
         "a photo of an astronaut riding a horse on mars",
-        #"cute grey cat with blue eyes, wearing a bowtie, acrylic painting"
+        # "cute grey cat with blue eyes, wearing a bowtie, acrylic painting"
     ]
 
     num_inference_steps = 50
@@ -188,8 +195,10 @@ def run_ort_pipeline(pipe, batch_size):
         print(f"Inference took {inference_end - inference_start} seconds")
         image.save(f"onnx_{i}.jpg")
 
+
 def run_torch_pipeline(pipe, batch_size):
     import torch
+
     # Warm up
     height = 512
     width = 512
@@ -198,7 +207,7 @@ def run_torch_pipeline(pipe, batch_size):
     # Test inputs
     prompts = [
         "a photo of an astronaut riding a horse on mars",
-        #"cute grey cat with blue eyes, wearing a bowtie, acrylic painting"
+        # "cute grey cat with blue eyes, wearing a bowtie, acrylic painting"
     ]
 
     # torch disable grad
@@ -224,22 +233,23 @@ def run_ort(directory, provider, batch_size):
     print(f"Model loading took {load_end - load_start} seconds")
     run_ort_pipeline(pipe, batch_size)
 
-def run_torch(disable_conv_algo_search, batch_size, disable_channels_last, torchscript=True):
+
+def run_torch(disable_conv_algo_search, batch_size, disable_channels_last, torchscript=True, enable_xformers=True):
     import torch
 
     if not disable_conv_algo_search:
         torch.backends.cudnn.enabled = True
         torch.backends.cudnn.benchmark = True
-    #torch.backends.cuda.matmul.allow_tf32 = True
+    # torch.backends.cuda.matmul.allow_tf32 = True
 
     # torch disable grad
     torch.set_grad_enabled(False)
-    
+
     load_start = time.time()
     if torchscript:
-        pipe = get_torchscript_pipeline(disable_channels_last)
+        pipe = get_torchscript_pipeline(disable_channels_last, enable_xformers)
     else:
-        pipe = get_torch_pipeline(disable_channels_last)
+        pipe = get_torch_pipeline(disable_channels_last, enable_xformers)
     load_end = time.time()
     print(f"Model loading took {load_end - load_start} seconds")
 
@@ -287,13 +297,16 @@ def parse_arguments():
     )
     parser.set_defaults(disable_channels_last=False)
 
-
     parser.add_argument(
-        "-b",
-        "--batch_size",
-        type=int,
-        default=1
+        "-x",
+        "--disable_xformers",
+        required=False,
+        action="store_true",
+        help="Disable xformers.",
     )
+    parser.set_defaults(disable_xformers=False)
+
+    parser.add_argument("-b", "--batch_size", type=int, default=1)
 
     args = parser.parse_args()
     return args
@@ -302,7 +315,7 @@ def parse_arguments():
 def main():
     args = parse_arguments()
     print(args)
-    
+
     if args.engine == "onnxruntime":
         provider = (
             ["CUDAExecutionProvider"]
@@ -317,7 +330,14 @@ def main():
         )
         run_ort(args.pipeline, provider, args.batch_size)
     else:
-        run_torch(args.disable_conv_algo_search, args.batch_size, args.disable_channels_last, args.engine == "torchscript")
+        run_torch(
+            args.disable_conv_algo_search,
+            args.batch_size,
+            args.disable_channels_last,
+            args.engine == "torchscript",
+            not args.disable_xformers,
+        )
+
 
 if __name__ == "__main__":
     main()
