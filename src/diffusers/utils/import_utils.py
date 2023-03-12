@@ -155,6 +155,7 @@ if _onnx_available:
         "onnxruntime-gpu",
         "onnxruntime-directml",
         "onnxruntime-openvino",
+        "ort_nightly_gpu",
         "ort_nightly_directml",
     )
     _onnxruntime_version = None
