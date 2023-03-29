@@ -25,7 +25,7 @@ from ...utils import deprecate, logging
 from ..onnx_utils import ORT_TO_NP_TYPE, OnnxRuntimeModel
 from ..pipeline_utils import DiffusionPipeline
 from . import StableDiffusionPipelineOutput
-
+from .timer import Timer
 
 logger = logging.get_logger(__name__)
 
@@ -111,7 +111,7 @@ class OnnxStableDiffusionPipeline(DiffusionPipeline):
         )
         self.register_to_config(requires_safety_checker=requires_safety_checker)
 
-    def _encode_prompt(self, prompt, num_images_per_prompt, do_classifier_free_guidance, negative_prompt):
+    def _encode_prompt(self, prompt, num_images_per_prompt, do_classifier_free_guidance, negative_prompt, timer):
         r"""
         Encodes the prompt into text encoder hidden states.
 
@@ -128,25 +128,28 @@ class OnnxStableDiffusionPipeline(DiffusionPipeline):
         """
         batch_size = len(prompt) if isinstance(prompt, list) else 1
 
-        # get prompt text embeddings
-        text_inputs = self.tokenizer(
-            prompt,
-            padding="max_length",
-            max_length=self.tokenizer.model_max_length,
-            truncation=True,
-            return_tensors="np",
-        )
-        text_input_ids = text_inputs.input_ids
-        untruncated_ids = self.tokenizer(prompt, padding="max_length", return_tensors="np").input_ids
-
-        if not np.array_equal(text_input_ids, untruncated_ids):
-            removed_text = self.tokenizer.batch_decode(untruncated_ids[:, self.tokenizer.model_max_length - 1 : -1])
-            logger.warning(
-                "The following part of your input was truncated because CLIP can only handle sequences up to"
-                f" {self.tokenizer.model_max_length} tokens: {removed_text}"
+        with timer.child("tokenizer"):
+            # get prompt text embeddings
+            text_inputs = self.tokenizer(
+                prompt,
+                padding="max_length",
+                max_length=self.tokenizer.model_max_length,
+                truncation=True,
+                return_tensors="np",
             )
+            text_input_ids = text_inputs.input_ids
+            untruncated_ids = self.tokenizer(prompt, padding="max_length", return_tensors="np").input_ids
 
-        prompt_embeds = self.text_encoder(input_ids=text_input_ids.astype(np.int32))[0]
+            if not np.array_equal(text_input_ids, untruncated_ids):
+                removed_text = self.tokenizer.batch_decode(untruncated_ids[:, self.tokenizer.model_max_length - 1 : -1])
+                logger.warning(
+                    "The following part of your input was truncated because CLIP can only handle sequences up to"
+                    f" {self.tokenizer.model_max_length} tokens: {removed_text}"
+                )
+
+        with timer.child("text_encoder"):
+            prompt_embeds = self.text_encoder(input_ids=text_input_ids.astype(np.int32))[0]
+
         prompt_embeds = np.repeat(prompt_embeds, num_images_per_prompt, axis=0)
 
         # get unconditional embeddings for classifier free guidance
@@ -231,8 +234,10 @@ class OnnxStableDiffusionPipeline(DiffusionPipeline):
         # corresponds to doing no classifier free guidance.
         do_classifier_free_guidance = guidance_scale > 1.0
 
+        timer = Timer(f"OnnxPipeline({prompt})")
+
         prompt_embeds = self._encode_prompt(
-            prompt, num_images_per_prompt, do_classifier_free_guidance, negative_prompt
+            prompt, num_images_per_prompt, do_classifier_free_guidance, negative_prompt, timer
         )
 
         # get the initial random noise unless the user supplied it
@@ -270,7 +275,8 @@ class OnnxStableDiffusionPipeline(DiffusionPipeline):
 
             # predict the noise residual
             timestep = np.array([t], dtype=timestep_dtype)
-            noise_pred = self.unet(sample=latent_model_input, timestep=timestep, encoder_hidden_states=prompt_embeds)
+            with timer.child("unet"):
+                noise_pred = self.unet(sample=latent_model_input, timestep=timestep, encoder_hidden_states=prompt_embeds)
             noise_pred = noise_pred[0]
 
             # perform guidance
@@ -279,10 +285,11 @@ class OnnxStableDiffusionPipeline(DiffusionPipeline):
                 noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_text - noise_pred_uncond)
 
             # compute the previous noisy sample x_t -> x_t-1
-            scheduler_output = self.scheduler.step(
-                torch.from_numpy(noise_pred), t, torch.from_numpy(latents), **extra_step_kwargs
-            )
-            latents = scheduler_output.prev_sample.numpy()
+            with timer.child("scheduler"):
+                scheduler_output = self.scheduler.step(
+                    torch.from_numpy(noise_pred), t, torch.from_numpy(latents), **extra_step_kwargs
+                )
+                latents = scheduler_output.prev_sample.numpy()
 
             # call the callback, if provided
             if callback is not None and i % callback_steps == 0:
@@ -291,31 +298,35 @@ class OnnxStableDiffusionPipeline(DiffusionPipeline):
         latents = 1 / 0.18215 * latents
         # image = self.vae_decoder(latent_sample=latents)[0]
         # it seems likes there is a strange result for using half-precision vae decoder if batchsize>1
-        image = np.concatenate(
-            [self.vae_decoder(latent_sample=latents[i : i + 1])[0] for i in range(latents.shape[0])]
-        )
+        with timer.child("vae_decoder"):
+            image = np.concatenate(
+                [self.vae_decoder(latent_sample=latents[i : i + 1])[0] for i in range(latents.shape[0])]
+            )
 
         image = np.clip(image / 2 + 0.5, 0, 1)
         image = image.transpose((0, 2, 3, 1))
 
         if self.safety_checker is not None:
-            safety_checker_input = self.feature_extractor(
-                self.numpy_to_pil(image), return_tensors="np"
-            ).pixel_values.astype(image.dtype)
+            with timer.child("safety_checker"):
+                safety_checker_input = self.feature_extractor(
+                    self.numpy_to_pil(image), return_tensors="np"
+                ).pixel_values.astype(image.dtype)
 
-            images, has_nsfw_concept = [], []
-            for i in range(image.shape[0]):
-                image_i, has_nsfw_concept_i = self.safety_checker(
-                    clip_input=safety_checker_input[i : i + 1], images=image[i : i + 1]
-                )
-                images.append(image_i)
-                has_nsfw_concept.append(has_nsfw_concept_i[0])
-            image = np.concatenate(images)
+                images, has_nsfw_concept = [], []
+                for i in range(image.shape[0]):
+                    image_i, has_nsfw_concept_i = self.safety_checker(
+                        clip_input=safety_checker_input[i : i + 1], images=image[i : i + 1]
+                    )
+                    images.append(image_i)
+                    has_nsfw_concept.append(has_nsfw_concept_i[0])
+                image = np.concatenate(images)
         else:
             has_nsfw_concept = None
 
         if output_type == "pil":
             image = self.numpy_to_pil(image)
+
+        timer.print_results()
 
         if not return_dict:
             return (image, has_nsfw_concept)
